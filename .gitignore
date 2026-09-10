@@ -1,0 +1,30 @@
+# Fetched at setup, not owned by this repo (see fetch_deps.py)
+runner_suite_core.py
+check_cuda_environment.py
+luts/
+
+# Model weights -- ultralytics downloads these by name on first run
+*.pt
+*.onnx
+*.pb
+*.pth
+
+# Per-machine config: copy settings_merged.example.json and edit
+settings_merged.json
+
+# Runtime output
+*.log
+_live_state.json
+runner_crop_report.csv
+delivery.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / tooling
+.DS_Store
+Thumbs.db
+.claude/

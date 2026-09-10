@@ -1,0 +1,15 @@
+# Tether Room -- crop + grade pipeline for tethered race photography.
+#
+# The crop engine (runner_suite_core.py) and the LUTs are fetched by
+# fetch_deps.py rather than pinned here; see the README.
+
+opencv-contrib-python>=4.10,<4.12
+ultralytics>=8.2.0
+numpy>=1.24
+piexif>=1.1.3
+tqdm>=4.66
+psutil>=5.9
+
+# torch arrives with ultralytics as a CPU build. For an NVIDIA GPU, install the
+# CUDA build explicitly -- roughly 3x faster end to end:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124

@@ -1,0 +1,157 @@
+{
+  "auto_hardware": true,
+  "paths": {
+    "output_folder": "",
+    "recursive": false
+  },
+  "hardware": {
+    "model_path": "auto",
+    "prefer_gpu": "auto",
+    "use_openvino_cpu": "auto",
+    "model_thread_lock": true,
+    "show_cuda_check": true
+  },
+  "detector": {
+    "imgsz": "auto",
+    "iou": 0.55,
+    "max_det": 120
+  },
+  "selection_filters": {
+    "enable_safe_zone": true,
+    "safe_zone_percent": 12,
+    "min_height_ratio": 0.15,
+    "min_box_height_px": 220,
+    "conf_threshold": 0.33,
+    "keypoint_conf": 0.3,
+    "min_keypoints": 4,
+    "require_frontal_face": false,
+    "min_sharpness_threshold": 80,
+    "hard_reject_fence": true,
+    "hard_reject_extreme_blur": true
+  },
+  "full_frame_runner": {
+    "enabled": true,
+    "trigger_box_height_ratio": 0.7,
+    "trigger_box_area_ratio": 0.34,
+    "bypass_safe_zone": true,
+    "bypass_min_keypoints": true,
+    "crop_to_aspect_ratio": true
+  },
+  "crop": {
+    "aspect_ratio": 0.666,
+    "pad_x": 0.38,
+    "pad_top": 0.18,
+    "pad_bottom": 0.28,
+    "small_person_threshold_px": 700,
+    "small_person_extra_pad_multiplier": 1.15
+  },
+  "fence_detection": {
+    "enabled": true,
+    "bright_threshold": 210,
+    "vertical_kernel_height_ratio": 0.11,
+    "min_component_height_ratio": 0.32,
+    "max_component_width_ratio": 0.11,
+    "min_component_aspect_ratio": 3.0,
+    "central_band_width_ratio": 0.58,
+    "reject_vertical_line_count": 5,
+    "reject_person_occlusion_coverage": 0.13,
+    "reject_central_occlusion_score": 0.22,
+    "reject_vertical_line_coverage": 0.15
+  },
+  "whole_image_fallback": {
+    "enabled": false,
+    "min_original_sharpness": 95,
+    "reject_if_fence": true,
+    "save_class": "review"
+  },
+  "review_enhancement": {
+    "enabled": false,
+    "prompt_after_run": true,
+    "auto_install": true,
+    "gfpgan_model_path": "GFPGANv1.4.pth",
+    "gfpgan_model_url": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth",
+    "gfpgan_model_sha256": "e2cd4703ab14f4d01fd1383a8a8b266f9a5833dacee8e6a79d3bf21a1b6be5ad",
+    "upscale": 1,
+    "output_subfolder": "_enhanced",
+    "flag_candidates": true,
+    "candidates_subfolder": "_promising_for_enhancement",
+    "candidate_max_sharpness": 160,
+    "candidate_min_brightness": 60,
+    "candidate_max_brightness": 195
+  },
+  "image_quality": {
+    "target_height": 4000,
+    "enable_fsrcnn": "auto",
+    "ai_upscaling_limit": "auto",
+    "fsrcnn_model_path": "FSRCNN_x3.pb",
+    "auto_download_fsrcnn": true,
+    "fsrcnn_model_url": "https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x3.pb",
+    "fsrcnn_model_sha256": "efd38655a815908c6c8954db6052f128e76a735f1de657894c477d0dc0b64481",
+    "sharpening": "strong",
+    "denoise": false,
+    "jpeg_quality": 95,
+    "preserve_exif": true,
+    "enhance_by_class": {
+      "premium": "none",
+      "good": "none",
+      "review": "none"
+    }
+  },
+  "quality_scoring": {
+    "save_quality_subfolders": true,
+    "save_review": false,
+    "hard_reject_below_score": 62,
+    "classes": {
+      "premium": 73,
+      "good": 60,
+      "review": 45
+    },
+    "excellent_sharpness": 300,
+    "ideal_runner_height_px": 700,
+    "ideal_confidence": 0.65,
+    "weights": {
+      "sharpness": 0.3,
+      "center": 0.12,
+      "size": 0.16,
+      "keypoints": 0.12,
+      "isolation": 0.08,
+      "confidence": 0.1,
+      "fence_free": 0.12
+    }
+  },
+  "performance": {
+    "workers": 24,
+    "batch_size": 1,
+    "prefetch_maxsize": "auto"
+  },
+  "debug": {
+    "write_csv": true,
+    "save_rejects": false,
+    "rejects_folder": "_rejects_stage6"
+  },
+  "pre_check": {
+    "enabled": true,
+    "min_image_sharpness": 50.0,
+    "min_image_brightness": 30.0,
+    "max_image_brightness": 230.0
+  },
+  "merged": {
+    "watch_folder": "",
+    "retouched_folder": "",
+    "work_folder": "",
+    "recursive": true,
+    "poll_interval_sec": 4.0,
+    "file_stability_checks": 2,
+    "premium_batch_size": 100,
+    "premium_batch_timeout_sec": 120,
+    "batch_folder_name_pattern": "{}",
+    "stop_when_idle_sec": 0,
+    "note_dir": "D:/ProLoad Bulk Loader/Release"
+  },
+  "lut": {
+    "enabled": true,
+    "lut_folder": "luts",
+    "selected": null,
+    "strength": 1.0
+  }
+}
