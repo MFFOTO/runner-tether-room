@@ -38,12 +38,7 @@
     "crop_to_aspect_ratio": true
   },
   "crop": {
-    "aspect_ratio": 0.666,
-    "pad_x": 0.38,
-    "pad_top": 0.18,
-    "pad_bottom": 0.28,
-    "small_person_threshold_px": 700,
-    "small_person_extra_pad_multiplier": 1.15
+    "aspect_ratio": 0.666
   },
   "fence_detection": {
     "enabled": true,
