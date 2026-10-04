@@ -58,6 +58,8 @@ class App:
         self.pipe: Optional[Pipeline] = None
         self.thread: Optional[threading.Thread] = None
         self.status = "loading"          # loading -> ready -> running -> stopped
+        self._switching = False          # a folder change is in progress
+        self.last_out = ""               # last confirmed destination, offered again after a switch
         self.error = ""
         self.watch = ""
         self.out = ""
@@ -137,6 +139,50 @@ class App:
         self.thread.start()
         return {"ok": True}
 
+    def change_watch(self, watch: str) -> Dict[str, Any]:
+        """Point the run at a different folder without closing the program.
+
+        The current run is stopped the normal way (in-flight photos finish, the
+        queue is delivered if it can be) and a fresh run is started on the new
+        folder. Also works from the stopped state, as a way to start again.
+        Runs on its own thread: the old run can take a few seconds to drain,
+        and the page should not sit waiting on the request."""
+        if self._switching:
+            return {"ok": False, "error": "already switching"}
+        if self.status not in ("running", "stopped"):
+            return {"ok": False, "error": "nothing is running yet -- use Start watching"}
+        if not watch or not Path(watch).is_dir():
+            return {"ok": False, "error": "that is not a folder"}
+        try:
+            same = bool(self.watch) and Path(watch).resolve() == Path(self.watch).resolve()
+        except OSError:
+            same = False
+        if same and self.status == "running":
+            return {"ok": False, "error": "already watching that folder"}
+        self._switching = True
+        threading.Thread(target=self._switch, args=(watch,), name="switch-folder",
+                         daemon=True).start()
+        return {"ok": True}
+
+    def _switch(self, watch: str) -> None:
+        try:
+            old_pipe, old_thread = self.pipe, self.thread
+            if old_pipe is not None and old_thread is not None and old_thread.is_alive():
+                old_pipe.request_stop()
+                old_thread.join()          # run() delivers what it can, then returns
+            self.error = ""
+            self.reset_samples()           # previews must not show the old folder's crops
+            res = self.start(watch)
+            if res.get("ok"):
+                if self.pipe:
+                    self.pipe.note(f"switched to {watch}")
+            else:
+                self.error = str(res.get("error") or "could not switch folder")
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._switching = False
+
     def _run(self) -> None:
         try:
             self.pipe.run()
@@ -147,14 +193,14 @@ class App:
 
     def stop(self) -> Dict[str, Any]:
         if self.pipe:
-            self.pipe.stop_idle = 0.001          # makes the watcher fall through
-            self.pipe.last_arrival = 0.0
+            self.pipe.request_stop()
         return {"ok": True}
 
     # ---------------- state for the UI ----------------
     def state(self) -> Dict[str, Any]:
         s: Dict[str, Any] = {
-            "status": self.status, "error": self.error,
+            "status": self.status, "error": self.error, "switching": self._switching,
+            "last_out": self.last_out,
             "watch": self.watch, "out": self.out,
             "luts": [p.name for p in (self.suite._available_luts() if self.suite else [])],
             "look": (self.suite._lut_name if self.suite else None),
@@ -169,7 +215,8 @@ class App:
                 cropped = p.crops_done
             s.update({
                 "cropped": cropped, "queued": queued,
-                "delivered": p.delivered, "batches": p.batch_no - 1,
+                "delivered": p.delivered, "batches": p.batches_done,
+                "failed": len(p.quarantined),
                 "seen": len(p.seen),
                 "elapsed": time.time() - self.started_at,
                 "grading": bool(getattr(p, "grading_now", None)),
@@ -182,7 +229,10 @@ class App:
             s.update({"cropped": 0, "queued": 0, "delivered": 0, "batches": 0,
                       "seen": 0, "elapsed": 0, "grading": False, "log": [],
                       "grading_on": True, "want_workers": 0})
-        s["has_crops"] = bool(self._crop_dir() and any(self._crop_dir().glob("*.jpg")))
+        # Crops cut in THIS run only. The work folder outlives a run, so its
+        # contents may be another event's; previews and the setup prompt must
+        # not be built on those.
+        s["has_crops"] = bool(p and p._queued)
         # The one prompt: raised as soon as there are crops to judge a look on
         # and the destination is still unknown.
         s["needs_setup"] = bool(s["has_crops"] and self.status == "running"
@@ -196,11 +246,13 @@ class App:
         s["manifest_lines"] = self._manifest_lines
         return s
 
-    def _crop_dir(self) -> Optional[Path]:
-        if not self.suite or not self.suite.output_folder:
-            return None
-        d = self.suite.output_folder / self.suite._quality_folder_name("premium")
-        return d if d.exists() else None
+    def _session_crops(self) -> List[Path]:
+        """Premium crops cut since this run began, in name order."""
+        p = self.pipe
+        if not p:
+            return []
+        with p.lock:
+            return [Path(x) for x in sorted(p._queued)]
 
     # ---------------- previews ----------------
     def _load_samples(self, force: bool = False) -> bool:
@@ -212,10 +264,7 @@ class App:
         grown keeps the spread honest.
         """
         with self._sample_lock:
-            d = self._crop_dir()
-            if not d:
-                return False
-            files = sorted(d.glob("*.jpg"))
+            files = self._session_crops()
             if not files:
                 return False
             grown = len(files) >= self._sampled_from * 2
@@ -419,6 +468,7 @@ class App:
         elif Path(self.pipe.out) != outp:
             self.pipe.pending_out = outp  # applied at the next batch boundary
         self.out = str(outp)
+        self.last_out = self.out
         self.set_job(spot, order, desc)
         configured = str(self.suite.cfg["merged"].get("note_dir", "") or "").strip()
         nd = (note_dir or "").strip() or configured or DEFAULT_NOTE_DIR or self.out
@@ -432,8 +482,10 @@ class App:
         n = self.pipe.resume_from_disk()      # nothing already cut is stranded
         res = self.set_look(lut)
         if res.get("ok"):
-            first = f"{clean}1" if clean else "1"
-            self.pipe.note(f"delivering to {outp} as {first}, {first[:-1]}2, ...")
+            # Numbering continues after any folders already in the destination.
+            n0 = max(self.pipe.batch_no, self.pipe._next_free_batch_no()) \
+                if self.pipe.out is not None else self.pipe.batch_no
+            self.pipe.note(f"delivering to {outp} as {clean}{n0}, {clean}{n0 + 1}, ...")
         return {"ok": bool(res.get("ok")), "look": res.get("look"),
                 "out": self.out, "prefix": clean, "resumed": n}
 
@@ -634,6 +686,7 @@ td.mono{font-family:var(--mono);font-size:12.5px}
     <button class="tiny" id="wup" aria-label="more workers">+</button>
   </span>
   <button class="quiet" id="pausebtn" hidden>Pause grading</button>
+  <button class="quiet" id="changebtn" hidden>Change folder</button>
   <button class="quiet" id="stopbtn" disabled>Stop</button>
   <button class="primary" id="lookbtn" disabled>Change look</button>
 </div>
@@ -761,12 +814,14 @@ function toast(m){const t=$('toast');t.textContent=m;t.classList.add('on');
 
 /* ---- folder browser ---- */
 function openBrowse(which){target=which;
-  $('btitle').textContent = which==='watch' ? 'Folder to monitor'
+  $('btitle').textContent = which==='change' ? 'Switch to a different folder to monitor'
+    : which==='watch' ? 'Folder to monitor'
     : which==='note' ? 'Where should the delivery note be written?'
     : 'Where should the finished photos go?';
+  $('buse').textContent = which==='change' ? 'Switch to this folder' : 'Use this folder';
   $('browse').classList.add('on');
-  nav(which==='watch' ? (ST.watch||'') : which==='note' ? (NOTEDIR||DEST||ST.out||'')
-                                                        : (DEST||ST.out||''));}
+  nav((which==='watch'||which==='change') ? (ST.watch||'')
+      : which==='note' ? (NOTEDIR||DEST||ST.out||'') : (DEST||ST.out||''));}
 function nav(p){ j('/api/browse?path='+encodeURIComponent(p)).then(d=>{
   bpath=d.path; $('bpath').textContent=d.path||'This PC';
   $('bcnt').textContent = d.path ? (d.images+' JPEG'+(d.images===1?'':'s')+' here') : '';
@@ -796,7 +851,18 @@ $('pickwatch').onclick=()=>openBrowse('watch');
 $('pickdest').onclick=()=>openBrowse('dest');
 $('picknote').onclick=()=>openBrowse('note');
 $('bcancel').onclick=()=>$('browse').classList.remove('on');
+function doChange(p){
+  j('/api/change_watch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({watch:p})}).then(r=>{
+      if(!r.ok){toast(r.error||'could not switch folder');return;}
+      // A new folder is a new delivery until told otherwise: the setup sheet
+      // opens again, pre-filled with the last destination, spot, order and
+      // description, and nothing is delivered until it is confirmed.
+      ST.watch=p; asked=false; $('picker').classList.remove('on');
+      toast('Switching to '+p+' \u2014 finishing the queue first');});}
+$('changebtn').onclick=()=>openBrowse('change');
 $('buse').onclick=()=>{ if(!bpath){toast('Pick a folder first');return;}
+  if(target==='change'){ $('browse').classList.remove('on'); doChange(bpath); return; }
   if(target==='watch'){ST.watch=bpath;$('watchval').textContent=bpath;
     $('watchval').classList.remove('empty'); $('startbtn').disabled=false;}
   else if(target==='note'){NOTEDIR=bpath;$('noteval').textContent=bpath;
@@ -892,8 +958,10 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
   LOOKS=s.luts||[];
   const running=s.status==='running';
   $('dot').className='dot'+(running?' on':(s.status==='error'?' err':''));
-  $('statetext').textContent = s.status==='loading'?'loading model':s.status;
-  $('stopbtn').disabled=!running; $('lookbtn').disabled=!(s.luts&&s.luts.length);
+  $('statetext').textContent = s.switching ? 'switching folder'
+                             : s.status==='loading'?'loading model':s.status;
+  $('stopbtn').disabled=!running||!!s.switching; $('lookbtn').disabled=!(s.luts&&s.luts.length);
+  $('changebtn').hidden = !((running||s.status==='stopped') && !s.switching);
   if(running||s.status==='stopped'){$('setup').style.display='none';$('live').style.display='block';}
   $('n-seen').textContent=fmt(s.seen); $('n-crop').textContent=fmt(s.cropped);
   $('n-q').textContent=fmt(s.queued); $('n-b').textContent=fmt(s.batches);
@@ -903,8 +971,9 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
   $('qlab').textContent=q+' / '+s.batch_size;
   $('qfill').style.width=(q/s.batch_size*100)+'%';
   $('w1').textContent=(s.workers||0)+' crop workers';
-  $('gsub').textContent = !GRADING ? 'paused by you — queue still filling'
-                        : (s.grading ? 'grading a batch' : 'idle');
+  $('gsub').textContent = (!GRADING ? 'paused by you — queue still filling'
+                        : (s.grading ? 'grading a batch' : 'idle'))
+    + (s.failed ? ' · '+s.failed+' crop'+(s.failed===1?'':'s')+' given up (see _failed)' : '');
   $('gstage').classList.toggle('active',!!s.grading);
   $('t-watch').textContent=s.watch||'—'; $('t-out').textContent=s.out||'—';
   const el=s.elapsed||0;
@@ -951,6 +1020,7 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
                                  : 'Use this look & start delivering';
   // Destination and folder name stay editable for the whole run: a name set
   // only in the first seconds could never be corrected afterwards.
+  if(!DEST && !s.out && s.last_out) DEST = s.last_out;   // offered again after a folder switch
   const shown = DEST || s.out || '';
   $('destval').textContent = shown || 'no folder chosen';
   $('destval').classList.toggle('empty', !shown);
@@ -1025,6 +1095,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self.app.start(b.get("watch", "")))
         elif u.path == "/api/stop":
             self._json(self.app.stop())
+        elif u.path == "/api/change_watch":
+            self._json(self.app.change_watch(self._body().get("watch", "")))
         elif u.path == "/api/look":
             self._json(self.app.set_look(self._body().get("lut")))
         elif u.path == "/api/deliver":

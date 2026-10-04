@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -139,6 +140,11 @@ class MergedSuite(HighResRunnerSuite):
     # the class at the moment it writes, so each crop announces itself here
     # instead -- exact under any number of workers.
     premium_sink: Optional[Callable[[Path], None]] = None
+    _faults: Dict[Path, str] = {}          # replaced per batch in deliver_batch
+    last_batch_faults: Dict[Path, str] = {}
+    # Set by the Pipeline: lets a blocking wait (the look picker) notice that
+    # the run is shutting down instead of holding the grader thread forever.
+    stop_event: Optional[threading.Event] = None
 
     def write_output(self, *args, **kwargs):
         # Pass everything straight through: the base signature carries optional
@@ -251,7 +257,11 @@ class MergedSuite(HighResRunnerSuite):
             # running -- until the operator picks a look in the page.
             print("[LUT] Waiting for a look to be chosen in the UI "
                   "(cropping continues) ...")
-            self.look_event.wait()
+            while not self.look_event.wait(0.5):
+                if self.stop_event is not None and self.stop_event.is_set():
+                    # Shutting down before anyone chose. Leave the look
+                    # unasked: the caller must not deliver this batch ungraded.
+                    return
             self._lut_asked = True
             return
         print("\n" + "=" * 60)
@@ -319,10 +329,14 @@ class MergedSuite(HighResRunnerSuite):
     # ------------------------------------------------------------------
     # stage 2: finish + grade + deliver
     # ------------------------------------------------------------------
+    # Why a crop failed, recorded per path so the Pipeline can tell a bad crop
+    # ("unreadable": counts against that crop) from a bad destination ("write":
+    # says nothing about the crop). Threads write distinct keys.
     def _finish_one(self, src: Path, out_folder: Path, quality: int,
                     grade: Optional[Callable]) -> bool:
         img = cv2.imread(str(src))
         if img is None:
+            self._faults[src] = "unreadable"
             return False
         self._finishing = True
         try:
@@ -333,7 +347,11 @@ class MergedSuite(HighResRunnerSuite):
         if grade is not None:
             img = grade(img)
         dst = out_folder / src.name
+        # Created here, on the first crop that is actually ready to be written,
+        # so a batch in which nothing can be written leaves no empty folder.
+        ensure_dir(out_folder)
         if not cv2.imwrite(str(dst), img, [cv2.IMWRITE_JPEG_QUALITY, quality]):
+            self._faults[src] = "write"
             return False
         self._copy_exif_without_orientation(src, dst)
         return True
@@ -343,7 +361,7 @@ class MergedSuite(HighResRunnerSuite):
         # No separator: the folder name matches the delivery note row exactly,
         # so "toby11" names both.
         out_folder = out_root / (f"{prefix}{batch_no}" if prefix else str(batch_no))
-        ensure_dir(out_folder)
+        # The folder itself is made by _finish_one on the first successful write.
         quality = int(self.cfg["image_quality"].get("jpeg_quality", 95))
         grade = self._grade_fn()
         look = self._lut_name or "ungraded"
@@ -356,12 +374,20 @@ class MergedSuite(HighResRunnerSuite):
         bar = tqdm(total=len(crops), desc=f"Batch {batch_no}") if tqdm is not None else None
 
         failed_paths: List[Path] = []
+        self._faults = {}
 
         def one(p: Path) -> bool:
             try:
                 ok = self._finish_one(p, out_folder, quality, grade)
+            except OSError as exc:
+                # Could not create the folder or write into it: the destination
+                # is the suspect, not this crop.
+                print(f"\n[WARN] {p.name}: {exc}")
+                self._faults[p] = "write"
+                ok = False
             except Exception as exc:
                 print(f"\n[WARN] {p.name}: {exc}")
+                self._faults[p] = "unreadable"
                 ok = False
             if not ok:
                 failed_paths.append(p)
@@ -387,6 +413,14 @@ class MergedSuite(HighResRunnerSuite):
         print(f"[STAGE 2] Batch #{batch_no} delivered: {done} ok, {failed} failed, "
               f"{secs:.1f}s ({secs / max(1, len(crops)) * 1000:.0f} ms/crop)")
         self.last_batch_failed = list(failed_paths)
+        self.last_batch_faults = dict(self._faults)
+        if done == 0:
+            # Nothing landed. Do not leave an empty numbered folder behind; it
+            # would use up a number and never get a line in the delivery note.
+            try:
+                out_folder.rmdir()
+            except OSError:
+                pass
         self.last_batch_folder = out_folder.name
         # What the folder holds is the only count worth reporting: writes can
         # collide on a filename, and the uploader acts on the folder.
@@ -404,6 +438,12 @@ class MergedSuite(HighResRunnerSuite):
 #  Runner
 # ---------------------------------------------------------------------------
 class Pipeline:
+    # A crop that cannot be read is retried this many times, then set aside.
+    MAX_CROP_FAILURES = 3
+    # Wait after the destination refuses a batch: base * 2^(streak-1), capped.
+    BACKOFF_BASE = 5.0
+    BACKOFF_MAX = 60.0
+
     def __init__(self, suite: MergedSuite, watch: Path, out: Optional[Path], work: Path):
         self.s = suite
         self.watch = watch
@@ -425,13 +465,23 @@ class Pipeline:
         # the output folder, silently shrinking it.
         self._queued: Set[str] = set()
         self.lock = threading.Lock()
+        # Two different things: stop_requested is the operator (or Ctrl+C)
+        # asking to finish; stop is set once cropping has actually wound down,
+        # and is what tells the grader to flush what is left and leave.
+        self.stop_requested = threading.Event()
         self.stop = threading.Event()
         self.crops_done = 0
         self.batch_no = 1
+        self.batches_done = 0        # folders actually delivered this run
+        self._fail_counts: Dict[str, int] = {}   # crop path -> times it has failed
+        self.quarantined: List[str] = []         # crops given up on this run
+        self._dest_fail_streak = 0               # consecutive batches the destination refused
+        self.created = time.time()   # crops older than this are from an earlier run
         self.delivered = 0
         self.last_premium = time.time()
         self.last_arrival = time.time()
         suite.premium_sink = self._on_premium
+        suite.stop_event = self.stop
         self.ui_log: List[str] = []      # short activity feed for the UI
         self.grading_now: Optional[int] = None
         self.desired_workers = max(1, int(suite.cfg["performance"].get("workers", 8)))
@@ -499,6 +549,11 @@ class Pipeline:
             self.last_premium = time.time()
 
     def _crop_one(self, p: Path) -> None:
+        if self.stop_requested.is_set():
+            # A large backlog is one pool.map(); without this, Stop would wait
+            # for every photo in it. Skipped photos are still on disk in the
+            # watch folder and are cropped on the next run.
+            return
         try:
             self.s.process_image(p)
         except Exception as exc:
@@ -508,20 +563,96 @@ class Pipeline:
             self.crops_done += 1
 
     # -- stage 2 (own thread, so the LUT prompt never stalls stage 1) ---
+    def _can_deliver(self) -> bool:
+        """Could a batch go out right now if one were ready? Used at shutdown
+        to tell "still draining" from "cannot drain, so leave"."""
+        if not self.grading_on.is_set():
+            return False                      # the operator paused grading
+        if self.out is None:
+            return False                      # no destination was ever chosen
+        if not self.s._lut_asked and getattr(self.s, "ui_mode", False):
+            return False                      # nobody picked a look
+        return True
+
+    def _next_free_batch_no(self) -> int:
+        """One past the highest numbered folder already in the destination.
+
+        Numbering restarts at 1 with every run, so without this a restart, or a
+        second event delivered to the same place, wrote into finish1 again and
+        left two note rows for the same folder."""
+        prefix = str(self.s.cfg["merged"].get("batch_folder_prefix", "") or "").strip()
+        pat = re.compile(r"^" + re.escape(prefix) + r"(\d+)$")
+        top = 0
+        try:
+            for d in self.out.iterdir():
+                if d.is_dir():
+                    m = pat.match(d.name)
+                    if m:
+                        top = max(top, int(m.group(1)))
+        except OSError:
+            pass
+        return top + 1
+
+    def _quarantine(self, p: Path, kind: str) -> None:
+        """Give up on one crop. It is moved to _failed in the work folder rather
+        than deleted, so nothing is lost, but it stops being retried."""
+        dest_dir = self.work / "_failed"
+        try:
+            dest_dir.mkdir(exist_ok=True)
+            p.rename(dest_dir / p.name)
+            where = f"moved to {dest_dir.name}"
+        except OSError:
+            where = "left where it is"
+        self.quarantined.append(p.name)
+        msg = (f"{p.name}: failed {self.MAX_CROP_FAILURES} times ({kind}) -- "
+               f"given up, {where}")
+        self.note(msg)
+        print(f"[STAGE 2] {msg}")
+
+    def _backoff(self, why: str) -> None:
+        """The destination refused a batch. Wait, rather than retrying flat out,
+        and never let it take the grader thread down."""
+        self._dest_fail_streak += 1
+        delay = min(self.BACKOFF_MAX, self.BACKOFF_BASE * 2 ** (self._dest_fail_streak - 1))
+        self.note(f"{why} -- retrying in {delay:.0f}s")
+        print(f"[STAGE 2] {why} -- retrying in {delay:.0f}s")
+        self.stop.wait(delay)               # returns at once if we are shutting down
+
+    def _abandon(self, n: int) -> None:
+        msg = (f"stopped with {n} Premium crop(s) undelivered -- they stay in "
+               f"the work folder")
+        self.note(msg)
+        print(f"[STOP] {msg}")
+
     def _grader(self) -> None:
-        while not self.stop.is_set() or self.pending:
+        while True:
+            stopping = self.stop.is_set()
             with self.lock:
                 n = len(self.pending)
                 idle = time.time() - self.last_premium
-            ready = n >= self.batch_size or (n > 0 and (idle >= self.batch_timeout or self.stop.is_set()))
+            if stopping and n == 0:
+                return
+            if stopping and n and self._dest_fail_streak >= 3:
+                self._abandon(n)                 # the destination is not coming back
+                return
+            if stopping and not self._can_deliver():
+                # Nothing more can go out: no destination, grading paused, or
+                # no look chosen. Waiting here is what used to leave Stop
+                # hanging for the full join timeout.
+                self._abandon(n)
+                return
+            ready = n >= self.batch_size or (n > 0 and (idle >= self.batch_timeout or stopping))
             if not ready or not self.grading_on.is_set():
                 time.sleep(0.5)
                 continue
             if not self.s._lut_asked or self.out is None:
                 self.s.ask_for_lut()
+                if not self.s._lut_asked:
+                    continue            # shutdown interrupted the wait; re-evaluate above
             if self.pending_out is not None:
                 self.out = self.pending_out
                 self.pending_out = None
+                self._write_target(self.out)
                 self.note(f"delivering to {self.out}")
             if self.out is None:            # still nowhere to deliver
                 time.sleep(0.5)
@@ -532,25 +663,61 @@ class Pipeline:
             take = [p for p in take if p.exists()]
             if not take:
                 continue
+            # Never reuse a folder number that already exists in the destination.
+            self.batch_no = max(self.batch_no, self._next_free_batch_no())
             no = self.batch_no
             self.batch_no += 1
             self.grading_now = no
             self.note(f"batch #{no} grading with {self.s._lut_name or 'no LUT'}")
-            done, _ = self.s.deliver_batch(take, no, self.out)
+            try:
+                done, _ = self.s.deliver_batch(take, no, self.out)
+            except Exception as exc:
+                # Anything that escapes here would end this thread for good:
+                # cropping carries on, the queue grows, nothing is delivered.
+                self.grading_now = None
+                with self.lock:
+                    self.pending = take + self.pending
+                self.batch_no = no
+                self._backoff(f"batch #{no} could not be delivered "
+                              f"({type(exc).__name__}: {exc})")
+                continue
             self.grading_now = None
             self.delivered += done
-            # Anything that failed to write is put back rather than lost; a
-            # short folder is worse than a slow one.
-            retry = [p for p in getattr(self.s, "last_batch_failed", []) if p.exists()]
+            if done:
+                self.batches_done += 1
+                self._dest_fail_streak = 0
+            else:
+                self.batch_no = no          # nothing was written: the number is unused
+            # Failed crops are put back rather than lost -- a short folder is
+            # worse than a slow one -- but not forever. A crop that cannot be
+            # read is retried a few times and then set aside. A write failure
+            # only counts against the crop if other crops in the same batch
+            # were written, i.e. the destination demonstrably works.
+            faults = getattr(self.s, "last_batch_faults", {})
+            retry: List[Path] = []
+            for rp in getattr(self.s, "last_batch_failed", []):
+                if not rp.exists():
+                    continue
+                kind = faults.get(rp, "write")
+                if kind == "unreadable" or done > 0:
+                    k = self._fail_counts.get(str(rp), 0) + 1
+                    self._fail_counts[str(rp)] = k
+                    if k >= self.MAX_CROP_FAILURES:
+                        self._quarantine(rp, kind)
+                        continue
+                retry.append(rp)
             if retry:
                 with self.lock:
-                    for rp in retry:
-                        self._queued.discard(str(rp))
-                        self._queued.add(str(rp))
-                        self.pending.append(rp)
+                    self.pending.extend(retry)
                     self.last_premium = time.time()
                 self.note(f"batch #{no}: {len(retry)} crop(s) failed -- requeued")
                 print(f"[STAGE 2] batch #{no}: {len(retry)} failed write(s) requeued")
+            if not done and any(faults.get(rp, "write") == "write" for rp in retry):
+                self._backoff(f"batch #{no}: the destination would not take any files")
+                continue
+            if not done:
+                self.note(f"batch #{no}: nothing could be delivered")
+                continue
             self.note(f"batch #{no} delivered — {done} crops")
             # The folder is complete and closed here: this is the one moment
             # its image count is final, so the delivery note is written now
@@ -564,20 +731,90 @@ class Pipeline:
                     print(f"[WARN] delivery note: {exc}")
 
     # -- main ----------------------------------------------------------
+    # -- destination ledger --------------------------------------------
+    # The work folder is named after the watch folder, so it outlives a run and
+    # is shared by every later event that watches the same folder. A small
+    # ledger records where its crops were being delivered, so leftovers from
+    # one delivery can never be picked up by another.
+    _LEDGER = "_delivery_target.txt"
+
+    @staticmethod
+    def _norm(p: Any) -> str:
+        return os.path.normcase(os.path.abspath(str(p)))
+
+    def _read_target(self) -> Optional[str]:
+        try:
+            txt = (self.work / self._LEDGER).read_text(encoding="utf-8").strip()
+            return txt or None
+        except OSError:
+            return None
+
+    def _write_target(self, out: Path) -> None:
+        try:
+            (self.work / self._LEDGER).write_text(str(out), encoding="utf-8")
+        except OSError as exc:
+            print(f"[WARN] could not record the delivery target: {exc}")
+
+    def _set_aside(self, crop_dir: Path, files: List[Path]) -> int:
+        """Move crops that belong to some other delivery into a dated subfolder
+        of the work folder. Nothing is deleted; they simply stop being
+        candidates for this run."""
+        dest = crop_dir / time.strftime("_previous_%Y%m%d_%H%M%S")
+        moved = 0
+        try:
+            dest.mkdir(exist_ok=True)
+        except OSError as exc:
+            print(f"[WARN] could not set aside earlier crops: {exc}")
+            return 0
+        for f in files:
+            try:
+                f.rename(dest / f.name)
+                moved += 1
+            except OSError:
+                pass
+        return moved
+
     def resume_from_disk(self) -> int:
         """Queue Premium crops that were cut but never delivered. The pending
         list lives in memory, so a restart would otherwise strand them even
-        though the crops themselves are safely on disk."""
+        though the crops themselves are safely on disk.
+
+        Only crops from an earlier run of *this same delivery* qualify. Crops
+        the ledger says were bound for a different folder, or that have no
+        ledger at all (an earlier event, or a version that did not keep one),
+        are set aside rather than delivered into the wrong order. Their source
+        photos, if still in the watch folder, are simply cropped again."""
         crop_dir = self.s.output_folder / self.s._quality_folder_name("premium")
         if not crop_dir.exists():
             return 0
-        already = set()
-        if self.out is not None and self.out.exists():
-            already = {f.name for f in self.out.rglob("*.jpg")}
         with self.lock:
             queued = set(self._queued)
-        missing = [f for f in sorted(crop_dir.glob("*.jpg"))
-                   if f.name not in already and str(f) not in queued]
+        # A leftover is a crop from before this run began. This run's own crops
+        # are in _queued, and the mtime test covers the instant between a crop
+        # being written and being announced -- moving that one would lose it.
+        leftovers = []
+        for f in sorted(crop_dir.glob("*.jpg")):
+            if str(f) in queued:
+                continue
+            try:
+                if f.stat().st_mtime < self.created:
+                    leftovers.append(f)
+            except OSError:
+                pass
+        if self.out is None:
+            return 0
+        target = self._read_target()
+        if leftovers and (target is None or self._norm(target) != self._norm(self.out)):
+            moved = self._set_aside(crop_dir, leftovers)
+            self.note(f"{moved} crop(s) from an earlier delivery set aside, not resumed")
+            print(f"[RESUME] {moved} leftover crop(s) belong to another delivery "
+                  f"({target or 'no record'}) -- set aside in {crop_dir.name}/_previous_*")
+            leftovers = []
+        self._write_target(self.out)
+        already = set()
+        if self.out.exists():
+            already = {f.name for f in self.out.rglob("*.jpg")}
+        missing = [f for f in leftovers if f.name not in already]
         if missing:
             with self.lock:
                 self._queued.update(str(f) for f in missing)
@@ -586,6 +823,12 @@ class Pipeline:
             self.note(f"resumed {len(missing)} crop(s) not yet delivered")
             print(f"[RESUME] {len(missing)} crop(s) already cut but not delivered -- queued.")
         return len(missing)
+
+    def request_stop(self) -> None:
+        """Operator asked to stop. Cropping ends after the photos already in
+        flight; the grader then delivers whatever can go out and leaves."""
+        self.stop_requested.set()
+        self.note("stopping -- finishing what is queued")
 
     def set_grading(self, on: bool) -> bool:
         if on:
@@ -628,6 +871,9 @@ class Pipeline:
         self.active_workers = workers
         try:
             while True:
+                if self.stop_requested.is_set():
+                    print("\n[STOP] Stop requested -- finishing up.")
+                    break
                 if self.desired_workers != self.active_workers:
                     # Swap between scans, never mid-batch: a ThreadPoolExecutor
                     # cannot be resized, so the old one is drained first.
@@ -664,7 +910,7 @@ class Pipeline:
             print("=" * 72)
             print(f"photos cropped   : {self.crops_done}")
             print(f"crops delivered  : {self.delivered}")
-            print(f"batches          : {self.batch_no - 1}")
+            print(f"batches          : {self.batches_done}")
             print(f"look             : {self.s._lut_name or 'ungraded'}")
             print(f"wall             : {secs:.1f}s "
                   f"({secs / max(1, self.crops_done):.3f}s per photo)")
