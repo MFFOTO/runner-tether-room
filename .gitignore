@@ -11,12 +11,14 @@ luts/
 
 # Per-machine config: copy settings_merged.example.json and edit
 settings_merged.json
+settings_grade.json
 
 # Runtime output
 *.log
 _live_state.json
 runner_crop_report.csv
 delivery.txt
+bench_grade_result.txt
 
 # Python
 __pycache__/

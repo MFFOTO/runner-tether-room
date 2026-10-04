@@ -1,0 +1,10 @@
+{
+  "lut_folder": "luts",
+  "port": 8771,
+  "quality": 95,
+  "target_height": 4000,
+  "sharpen": "strong",
+  "interpolation": "lanczos",
+  "workers": 0,
+  "warn_below": 4000
+}
