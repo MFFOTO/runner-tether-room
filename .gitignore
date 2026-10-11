@@ -1,6 +1,8 @@
 # Fetched at setup, not owned by this repo (see fetch_deps.py)
 runner_suite_core.py
 check_cuda_environment.py
+install_enhancer_deps.py
+*.bak_before_*
 luts/
 
 # Model weights -- ultralytics downloads these by name on first run

@@ -42,8 +42,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo For an NVIDIA GPU, install the CUDA build of torch as well:
-echo    .venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+echo For an NVIDIA GPU, install the CUDA build of torch as well (cu128 also covers RTX 50xx):
+echo    .venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 echo (CPU-only works too, just slower.)
 
 rem ---- 4. crop engine + LUTs ------------------------------------------

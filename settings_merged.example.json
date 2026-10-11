@@ -26,6 +26,8 @@
     "min_keypoints": 4,
     "require_frontal_face": false,
     "min_sharpness_threshold": 80,
+    "sharpness_metric": "subject",
+    "premium_min_sharpness": 180,
     "hard_reject_fence": true,
     "hard_reject_extreme_blur": true
   },
@@ -101,7 +103,7 @@
       "good": 60,
       "review": 45
     },
-    "excellent_sharpness": 300,
+    "excellent_sharpness": 350,
     "ideal_runner_height_px": 700,
     "ideal_confidence": 0.65,
     "weights": {

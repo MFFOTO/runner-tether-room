@@ -27,6 +27,8 @@ CORE_URL = ("https://raw.githubusercontent.com/MFFOTO/runner-suite-stage6/"
 EXTRA = {
     "check_cuda_environment.py": ("https://raw.githubusercontent.com/MFFOTO/"
                                   "runner-suite-stage6/master/check_cuda_environment.py"),
+    "install_enhancer_deps.py": ("https://raw.githubusercontent.com/MFFOTO/"
+                                 "runner-suite-stage6/master/install_enhancer_deps.py"),
 }
 LUT_API = "https://api.github.com/repos/MFFOTO/runner-lut-suite/contents/luts"
 
