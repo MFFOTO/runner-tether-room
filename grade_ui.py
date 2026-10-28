@@ -35,6 +35,7 @@ DEFAULTS: Dict[str, Any] = {
     "port": 8771,
     "quality": 95,
     "target_height": 4000,
+    "finish": True,                 # "Also finish to <target_height> px" starts ticked; false = native size
     "sharpen": "strong",
     "interpolation": "lanczos",     # lanczos | cubic (cubic is ~9x faster when upscaling)
     "warn_below": 4000,             # warn about photos whose longer side is under this (0 = off)
@@ -375,6 +376,7 @@ class App:
             "defaults": {
                 "quality": int(self.cfg["quality"]),
                 "target_height": int(self.cfg["target_height"]),
+                "finish": bool(self.cfg.get("finish", True)),
                 "sharpen": str(self.cfg["sharpen"]),
                 "workers": self._cfg_workers() or gs.auto_workers(),
                 "workers_auto": self._cfg_workers() == 0,
@@ -808,7 +810,7 @@ $('warnbelow').addEventListener('input',()=>{ clearTimeout(warnT); warnT=setTime
 function tick(){ j('/api/state').then(s=>{ ST=s;
   if(!LOADED&&s.luts) {LOOKS=s.luts;} else if(s.luts) LOOKS=s.luts;
   if(!sel&&LOOKS.length){ sel=LOOKS[0]; }
-  if(!$('height').dataset.init){ $('height').value=s.defaults.target_height; $('quality').value=s.defaults.quality;
+  if(!$('height').dataset.init){ $('height').value=s.defaults.target_height; $('finish').checked=!!s.defaults.finish; $('quality').value=s.defaults.quality;
     $('workers').value=s.defaults.workers; WAUTO=!!s.defaults.workers_auto; $('wauto').style.display=WAUTO?'':'none'; $('warnbelow').value=s.defaults.warn_below; $('sharpen').value=s.defaults.sharpen; $('height').dataset.init=1;
     $('noexif').style.display=s.defaults.exif?'none':'block'; }
   buildLooks(); if(!$('tiles').children.length&&sel) showLook(sel);
@@ -835,7 +837,7 @@ function tick(){ j('/api/state').then(s=>{ ST=s;
     $('t-look').textContent=lastName(jb.lut)+' at '+Math.round(jb.strength*100)+'%'+(jb.finish?' · finished':' · native size');
     $('t-in').textContent=jb.input; $('t-out').textContent=jb.output; $('t-rep').textContent=jb.report;
     const w=$('srgb'); if(jb.non_srgb&&jb.non_srgb.length){w.style.display='block';
-      w.textContent='Some photos carry a colour profile that is not sRGB ('+jb.non_srgb.join(', ')+'). The looks assume sRGB, so the result may not be what you expect. The profile was kept.';}
+      w.textContent='Some photos carry a colour profile that is not sRGB ('+jb.non_srgb.join(', ')+'). They were converted to sRGB IEC61966-2.1 before the look was applied.';}
     else w.style.display='none';
     const L=$('log'); L.innerHTML=''; (jb.log||[]).forEach(m=>{const d=document.createElement('div');d.textContent=m;L.appendChild(d);});
   }

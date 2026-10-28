@@ -11,8 +11,9 @@ Grade Room engine -- applies a .cube LUT to folders of JPEGs. No cropping.
   target height (aspect ratio kept -- nothing is trimmed), sharpen, then grade.
 * Every output is stamped in its EXIF Software tag, so a file that has already
   been graded is recognised and skipped instead of being graded twice.
-* The colour profile (ICC) is carried across; the .cube files assume sRGB, so a
-  file tagged with anything else is reported.
+* Every output is tagged sRGB IEC61966-2.1. The .cube files assume sRGB, so a
+  source tagged with any other RGB profile is converted to sRGB first (and
+  reported); an untagged source is taken to be sRGB already.
 * Restart-safe: files whose output already exists are skipped, and every
   output is written to a temporary name and renamed, so a killed run never
   leaves half a JPEG behind.
@@ -40,6 +41,7 @@ import cv2
 import numpy as np
 
 import lut as lutlib
+import srgb
 
 try:
     import piexif  # type: ignore
@@ -282,7 +284,11 @@ def insert_icc(data: bytes, icc: bytes) -> bytes:
 
 
 def icc_is_srgb(icc: bytes) -> bool:
-    """Heuristic: sRGB profiles name themselves (as ASCII or UTF-16)."""
+    """Heuristic: sRGB profiles name themselves in their description. Only
+    a profile with no readable description falls back to searching all of it."""
+    name = icc_name(icc)
+    if name != "unnamed profile":
+        return "srgb" in name.lower()
     return b"sRGB" in icc or b"\x00s\x00R\x00G\x00B" in icc
 
 
@@ -325,14 +331,17 @@ def is_stamped(exif_dict: Optional[dict]) -> bool:
         return False
 
 
-def build_exif(exif_dict: Optional[dict], stamp: str, size: Tuple[int, int]) -> Optional[bytes]:
-    """The EXIF block for a graded file: everything the source had, minus
+def build_exif(exif_dict: Optional[dict], stamp: Optional[str], size: Tuple[int, int]) -> Optional[bytes]:
+    """The EXIF block for a graded file: everything the source had (dates
+    included), minus
 
     * Orientation -- OpenCV has already rotated the pixels, so keeping the tag
       would rotate them a second time in every viewer;
     * the embedded thumbnail -- it is a picture of the ungraded original;
 
-    plus the stamp and the true pixel dimensions."""
+    plus the stamp (if given) and the true pixel dimensions. If the block will
+    not fit in one JPEG segment, or piexif cannot write it, the maker note (the
+    camera's private blob) is dropped and the standard tags are kept."""
     if piexif is None:
         return None
     d = dict(exif_dict) if exif_dict else {}
@@ -341,11 +350,29 @@ def build_exif(exif_dict: Optional[dict], stamp: str, size: Tuple[int, int]) -> 
     d.pop("1st", None)
     d.pop("thumbnail", None)
     d["0th"].pop(piexif.ImageIFD.Orientation, None)
-    d["0th"][piexif.ImageIFD.Software] = stamp.encode("ascii", "replace")
+    if stamp is not None:
+        d["0th"][piexif.ImageIFD.Software] = stamp.encode("ascii", "replace")
     w, h = size
     d["Exif"][piexif.ExifIFD.PixelXDimension] = int(w)
     d["Exif"][piexif.ExifIFD.PixelYDimension] = int(h)
+    try:
+        out = piexif.dump(d)
+        if len(out) + 2 <= 0xFFFF:
+            return out
+    except Exception:
+        pass
+    d["Exif"].pop(piexif.ExifIFD.MakerNote, None)
     return piexif.dump(d)
+
+
+def has_capture_date(exif: Optional[bytes]) -> bool:
+    """True if a piexif.dump() block carries DateTimeOriginal."""
+    if not exif or piexif is None:
+        return False
+    try:
+        return bool(piexif.load(exif).get("Exif", {}).get(piexif.ExifIFD.DateTimeOriginal))
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +537,23 @@ def process_file(src: Path, dst: Path, opts: Options, packed: np.ndarray,
     if on_size:
         on_size(img.shape[1], img.shape[0])              # the source's size, before any scaling
 
+    # The look assumes sRGB: bring a differently tagged source into it first.
+    detail = ""
+    src_icc = extract_icc(data)
+    if src_icc and not icc_is_srgb(src_icc):
+        name = icc_name(src_icc)
+        if srgb.is_rgb_profile(src_icc):
+            try:
+                img = srgb.to_srgb(img, src_icc)
+            except Exception as exc:
+                # Tagging unconverted pixels as sRGB would quietly change the colours.
+                return "error", f"profile {name} could not be converted to sRGB ({exc})"
+            detail = f"converted from {name} to sRGB"
+        else:
+            detail = f"profile {name} is not an RGB profile; tagged sRGB as-is"
+        if on_profile:
+            on_profile(name)
+
     if opts.finish:
         img = finish_image(img, opts.target_height, opts.sharpen, opts.interpolation)
         lap.mark("finish")
@@ -524,7 +568,6 @@ def process_file(src: Path, dst: Path, opts: Options, packed: np.ndarray,
 
     # Everything is put together in memory and written once. (Inserting the EXIF and
     # the profile into the file afterwards meant reading and rewriting it twice more.)
-    detail = ""
     segs: List[bytes] = []
     if piexif is not None:
         try:
@@ -532,16 +575,11 @@ def process_file(src: Path, dst: Path, opts: Options, packed: np.ndarray,
                               (img.shape[1], img.shape[0]))
             if exif:
                 segs.append(exif_segment(exif))
+                if not has_capture_date(exif):
+                    detail = (detail + "; " if detail else "") + "source has no capture date"
         except Exception as exc:
-            detail = f"EXIF not copied ({exc})"
-    icc = extract_icc(data)
-    if icc:
-        segs.append(icc_segments(icc))
-        if not icc_is_srgb(icc):
-            name = icc_name(icc)
-            detail = (detail + "; " if detail else "") + f"profile {name} (not sRGB)"
-            if on_profile:
-                on_profile(name)
+            detail = (detail + "; " if detail else "") + f"EXIF not copied ({exc})"
+    segs.append(icc_segments(srgb.srgb_icc()))
     if segs:
         payload = insert_segments(payload, *segs)
     lap.mark("assemble")
@@ -890,7 +928,7 @@ class Job:
             first = name not in self.non_srgb
             self.non_srgb.add(name)
         if first:
-            self.note(f"colour profile '{name}' is not sRGB -- graded as-is, profile kept")
+            self.note(f"colour profile '{name}' is not sRGB -- converted to sRGB IEC61966-2.1")
 
     def run(self) -> None:
         o = self.o

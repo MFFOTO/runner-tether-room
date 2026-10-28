@@ -37,6 +37,7 @@ except Exception:
 
     class _EXIF:
         PixelXDimension, PixelYDimension = 40962, 40963
+        MakerNote, DateTimeOriginal, SubSecTimeOriginal = 37500, 36867, 37521
 
     fake = types.ModuleType("piexif")
     fake.ImageIFD, fake.ExifIFD = _IFD, _EXIF
@@ -205,22 +206,70 @@ if Image is not None:
         tag = None
     check("the Orientation tag is gone from the output", tag is None, tag)
 
-    # ICC profile carried through
-    srgb = ImageCms.createProfile("sRGB")
-    icc = ImageCms.ImageCmsProfile(srgb).tobytes()
+    # every output is tagged sRGB IEC61966-2.1
+    import srgb as srgblib
+    icc = srgblib.srgb_icc()
+    prof = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+    check("the built-in profile is a valid RGB profile named sRGB IEC61966-2.1",
+          ImageCms.getProfileDescription(prof).strip() == "sRGB IEC61966-2.1"
+          and gs.icc_name(icc) == "sRGB IEC61966-2.1" and gs.icc_is_srgb(icc))
+    # same colorimetry as LittleCMS's own sRGB: a round trip through it is the identity
+    ref = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+    tr = ImageCms.buildTransform(prof, ref, "RGB", "RGB", renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC)
+    ramp = Image.fromarray(np.tile(np.arange(256, dtype=np.uint8)[:, None, None], (1, 8, 3)))
+    drift = np.abs(np.asarray(ImageCms.applyTransform(ramp, tr)).astype(int) - np.asarray(ramp).astype(int)).max()
+    check("it matches the reference sRGB to within 1 level", drift <= 1, drift)
+
     p = tmp / "icc" / "s.jpg"
     p.parent.mkdir()
-    Image.fromarray(arr).save(p, "JPEG", icc_profile=icc, quality=95)
+    Image.fromarray(arr).save(p, "JPEG", quality=95)                  # no profile at all
     seen = []
     st, detail = gs.process_file(p, tmp / "icc_out" / "s.jpg", o, packed_swap, on_profile=seen.append)
-    check("an sRGB profile is copied byte for byte and not flagged",
-          gs.extract_icc((tmp / "icc_out" / "s.jpg").read_bytes()) == icc and not seen)
+    check("an untagged source comes out tagged sRGB IEC61966-2.1, not flagged",
+          gs.extract_icc((tmp / "icc_out" / "s.jpg").read_bytes()) == icc and not seen and st == "ok", (st, detail))
+
+    # a wide-gamut RGB source: converted, then tagged sRGB
+    wide = bytearray(icc)
+    n = struct.unpack(">I", wide[128:132])[0]
+    for i in range(n):
+        sig, off, size = struct.unpack(">4sII", wide[132 + 12 * i:144 + 12 * i])
+        if sig == b"rXYZ":
+            wide[off + 8:off + 20] = struct.pack(">iii", int(0.6097 * 65536), int(0.3111 * 65536), int(0.0195 * 65536))
+        if sig == b"desc":
+            wide[off + 12:off + 29] = b"Wide Test RGB 000"
+    wide = bytes(wide)
+    p3 = tmp / "icc" / "w.jpg"
+    Image.fromarray(arr).save(p3, "JPEG", icc_profile=wide, quality=95)
+    seen = []
+    st, detail = gs.process_file(p3, tmp / "icc_out" / "w.jpg", o, packed_swap, on_profile=seen.append)
+    check("a wide-gamut source is converted, reported and tagged sRGB IEC61966-2.1",
+          st == "ok" and "converted" in detail and len(seen) == 1
+          and gs.extract_icc((tmp / "icc_out" / "w.jpg").read_bytes()) == icc, (st, detail, seen))
+    a_img = cv2.imread(str(tmp / "icc_out" / "w.jpg")).astype(int)
+    b_img = cv2.imread(str(tmp / "icc_out" / "s.jpg")).astype(int)
+    check("and its pixels really changed", np.abs(a_img - b_img).mean() > 1.0)
+
     lab = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()
     p2 = tmp / "icc" / "l.jpg"
     Image.fromarray(arr).save(p2, "JPEG", icc_profile=lab, quality=95)
     seen = []
     gs.process_file(p2, tmp / "icc_out" / "l.jpg", o, packed_swap, on_profile=seen.append)
-    check("a non-sRGB profile is kept and reported", gs.extract_icc((tmp / "icc_out" / "l.jpg").read_bytes()) == lab and len(seen) == 1, seen)
+    check("a non-RGB profile is reported and the output is still tagged sRGB IEC61966-2.1",
+          gs.extract_icc((tmp / "icc_out" / "l.jpg").read_bytes()) == icc and len(seen) == 1, seen)
+
+    # capture date survives
+    if REAL_PIEXIF:
+        ex2 = Image.Exif()
+        ex2[0x0110] = "TestCam"
+        ex2.get_ifd(0x8769)[0x9003] = "2026:10:11 08:15:30"
+        ex2.get_ifd(0x8769)[0x9291] = "123"
+        pd = tmp / "icc" / "d.jpg"
+        Image.fromarray(arr).save(pd, "JPEG", exif=ex2, quality=95)
+        gs.process_file(pd, tmp / "icc_out" / "d.jpg", o, packed_swap)
+        got = piexif.load(str(tmp / "icc_out" / "d.jpg"))
+        check("DateTimeOriginal and sub-seconds are carried over unchanged",
+              got["Exif"].get(piexif.ExifIFD.DateTimeOriginal) == b"2026:10:11 08:15:30"
+              and got["Exif"].get(piexif.ExifIFD.SubSecTimeOriginal) == b"123")
     big = bytes(range(256)) * 700                       # 179 KB: needs several APP2 chunks
     out_bytes = gs.insert_icc(cv2.imencode(".jpg", arr)[1].tobytes(), big)
     check("an ICC profile larger than one JPEG segment round-trips", gs.extract_icc(out_bytes) == big)

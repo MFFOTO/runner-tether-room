@@ -85,6 +85,14 @@ finish2   876593    100      10k men, wet conditions
 finish3   876593     47      10k men, wet conditions
 ```
 
+Every delivered JPEG keeps the original photo's EXIF, capture date included,
+and is tagged with the **sRGB IEC61966-2.1** colour profile. Only the
+Orientation tag (the pixels are already rotated) and the thumbnail of the
+uncropped original are dropped, and the pixel dimensions are corrected. The same
+goes for the native-size crops in the work folder. Tether Room does not convert
+colours: it assumes the camera shoots sRGB and warns once if a file says
+otherwise.
+
 Fields: `spot name`, `order number`, `number of images`, `description`.
 The first row is a fixed header. The spot name carries the folder number, so a
 row and its folder are the same string.
@@ -171,8 +179,10 @@ git-ignored like the Tether Room settings.
    compare with the original, use the arrow keys (or the side buttons) to step
    through the samples, and press Esc to close. If the large preview cannot be
    made, the page says why and keeps showing the small one.
-3. **Options.** By default files are graded at native size. Tick *Also finish
-   to* to scale to a target height (4000 px, aspect ratio kept, nothing
+3. **Options.** *Also finish to* starts ticked, so files are scaled to the target
+   height (4000 px by default) unless you untick it for native size; set
+   `"finish": false` in `settings_grade.json` to make native size the default.
+   Finishing scales to a target height (4000 px, aspect ratio kept, nothing
    trimmed), sharpen and then grade, which is the same finishing as Tether
    Room's stage 2. Also here: JPEG quality, parallel workers (automatic by default), *Keep watching
    for new photos after this batch* (files still being written are left until
@@ -202,10 +212,13 @@ Notes:
   `0` turns the warning off. The rule is on the longer side, so orientation does
   not matter, and 3999 px is flagged while 4000 px is not. It looks at the
   source photo's own size, whether or not *Also finish to* is ticked.
-- The colour profile is carried across. The LUTs assume sRGB, so a file tagged
-  with anything else is reported.
+- Every output is tagged **sRGB IEC61966-2.1**. The LUTs assume sRGB, so a
+  source tagged with another RGB profile (Adobe RGB, Display P3 ...) is first
+  converted to sRGB, and the file is reported. An untagged source is taken to be
+  sRGB. EXIF, capture date included, is carried across.
 - `_grade_report.csv` in the output folder lists every file and what happened.
-- `settings_grade.json` keys: `lut_folder`, `port`, `quality`, `target_height`,
+- `settings_grade.json` keys: `lut_folder`, `port`, `quality`, `finish` (default
+  `true`), `target_height`,
   `warn_below` (default 4000, `0` = off), `sharpen` (`none`/`light`/`medium`/`strong`), `interpolation` (`lanczos` or
   `cubic` — cubic is about 9x faster when upscaling), `workers` (`0` or `"auto"` = automatic, or a fixed 1–64).
 - Workers: automatic means one worker per CPU thread (a 32-thread CPU gets 32),

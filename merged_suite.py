@@ -36,7 +36,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 
+import grade_suite as gs            # JPEG metadata helpers (EXIF / ICC segments)
 import lut as lutlib
+import srgb
 from runner_suite_core import (
     DEFAULT_CONFIG,
     HighResRunnerSuite,
@@ -145,6 +147,60 @@ class MergedSuite(HighResRunnerSuite):
     # Set by the Pipeline: lets a blocking wait (the look picker) notice that
     # the run is shutting down instead of holding the grader thread forever.
     stop_event: Optional[threading.Event] = None
+
+    # The engine calls this after every JPEG it writes: stage-1 crops (src is the
+    # original photo), stage-2 deliveries (src is the stage-1 crop) and enhanced
+    # copies. Overriding it is what makes the two promises below hold for all of
+    # them, whichever path wrote the file:
+    #   * the original EXIF travels with the image, capture date included. It is
+    #     rebuilt rather than copied blind: Orientation goes (the pixels are
+    #     already rotated), as does the thumbnail of the uncropped original, and
+    #     the pixel dimensions are corrected. If a maker note is too big to fit,
+    #     only that is dropped. The base version swallowed every error silently.
+    #   * the file is tagged sRGB IEC61966-2.1.
+    def _copy_exif_without_orientation(self, src: Path, dst: Path) -> None:
+        try:
+            src_data = Path(src).read_bytes()
+            segs: List[bytes] = []
+            exif_dict = gs._load_exif(src_data)
+            if gs.piexif is not None and bool(self.cfg["image_quality"].get("preserve_exif", True)):
+                size = gs.jpeg_size(dst)
+                if size is None:
+                    raise ValueError("cannot read the size of the written JPEG")
+                exif = gs.build_exif(exif_dict, None, size)
+                if exif:
+                    segs.append(gs.exif_segment(exif))
+                    if not gs.has_capture_date(exif):
+                        self._warn_once("nodate", f"{Path(dst).name} has no capture date in its EXIF "
+                                                  f"(the original had none either)")
+            self._check_source_colour(src_data, exif_dict, Path(src).name)
+            segs.append(gs.icc_segments(srgb.srgb_icc()))
+            out = gs.insert_segments(Path(dst).read_bytes(), *segs)
+            tmp = Path(dst).with_name(Path(dst).name + ".part")
+            tmp.write_bytes(out)
+            os.replace(tmp, dst)
+        except Exception as exc:
+            print(f"\n[WARN] {Path(dst).name}: EXIF / colour profile not written ({exc})")
+
+    def _warn_once(self, key: str, msg: str) -> None:
+        seen = self.__dict__.setdefault("_warned", set())
+        if key not in seen:
+            seen.add(key)
+            print(f"\n[WARN] {msg}")
+
+    def _check_source_colour(self, data: bytes, exif_dict: Optional[dict], name: str) -> None:
+        """Crops are tagged sRGB, which is only true if the camera shot sRGB.
+        Say so once if the file declares otherwise."""
+        icc = gs.extract_icc(data)
+        if icc and not gs.icc_is_srgb(icc):
+            pname = gs.icc_name(icc)
+            self._warn_once("icc:" + pname, f"{name} carries the colour profile '{pname}', not sRGB. "
+                                            f"Crops are tagged sRGB IEC61966-2.1 without conversion; "
+                                            f"set the camera to sRGB.")
+        elif gs.piexif is not None and exif_dict:
+            if (exif_dict.get("Interop") or {}).get(gs.piexif.InteropIFD.InteroperabilityIndex) == b"R03":
+                self._warn_once("r03", f"{name} is marked Adobe RGB by the camera. Crops are tagged "
+                                       f"sRGB IEC61966-2.1 without conversion; set the camera to sRGB.")
 
     def write_output(self, *args, **kwargs):
         # Pass everything straight through: the base signature carries optional

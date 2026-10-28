@@ -2,6 +2,7 @@
   "lut_folder": "luts",
   "port": 8771,
   "quality": 95,
+  "finish": true,
   "target_height": 4000,
   "sharpen": "strong",
   "interpolation": "lanczos",
