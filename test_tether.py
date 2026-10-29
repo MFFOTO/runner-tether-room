@@ -29,15 +29,37 @@ from PIL import Image, ImageCms
 # Stand-in for the crop engine: only what merged_suite imports, plus the few
 # base-class behaviours the code under test calls.
 core = types.ModuleType("runner_suite_core")
-core.DEFAULT_CONFIG = {}
-core.deep_merge = lambda a, b: a
+core.DEFAULT_CONFIG = {"quality_scoring": {"premium_only": False}, "performance": {"fast_path": True},
+                       "completeness_guard": {"edge_truncation_guard": True}}
+
+
+def _deep_merge(base, override):                 # the engine's own, as it is
+    result = dict(base)
+    for key, value in override.items():
+        result[key] = _deep_merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else value
+    return result
+
+
+core.deep_merge = _deep_merge
 core.ensure_dir = lambda p: Path(p).mkdir(parents=True, exist_ok=True)
 core.tqdm = None
 
 
 class _Base:
-    def _should_save_class(self, quality_class, score):
-        return quality_class == "premium"
+    def _copy_exif_without_orientation(self, src, dst, size=None):
+        """What the patched crop engine does (see its test_metadata.py): copy the EXIF except the
+        orientation and the thumbnail, with the real pixel dimensions. Stand-in so that Tether
+        Room's override, which calls it, can be tested without the engine."""
+        import piexif as _px
+        d = _px.load(str(src))
+        for k in ("0th", "Exif", "GPS", "Interop"):
+            d[k] = dict(d.get(k) or {})
+        d.pop("1st", None); d.pop("thumbnail", None)
+        d["0th"].pop(_px.ImageIFD.Orientation, None)
+        wh = size or gs.jpeg_size(dst)
+        d["Exif"][_px.ExifIFD.PixelXDimension], d["Exif"][_px.ExifIFD.PixelYDimension] = int(wh[0]), int(wh[1])
+        _px.insert(_px.dump(d), str(dst))
+        return True
 
     def resize_final(self, img, enhance_mode="none"):
         return img
@@ -134,13 +156,38 @@ s.cfg = {"merged": dict(ms.MERGED_CONFIG_EXTRA["merged"]), "image_quality": {"pr
 # --- Good crops: default drops everything but Premium
 chk("defaults: Good crops off, delete-after-delivery on",
     s.cfg["merged"]["keep_good_crops"] is False and s.cfg["merged"]["delete_crops_after_delivery"] is True)
-chk("default: premium saved", s._should_save_class("premium", 90))
-chk("default: good NOT saved", not s._should_save_class("good", 65))
-chk("default: review/reject NOT saved", not s._should_save_class("review", 50) and not s._should_save_class("reject", 10))
+s.cfg["quality_scoring"] = {"premium_only": None}
+ms.apply_crop_policy(s.cfg)
+chk("default: only Premium crops are written (the engine's premium_only is switched on)", s.cfg["quality_scoring"]["premium_only"] is True)
 s.cfg["merged"]["keep_good_crops"] = True
-chk("keep_good on: good saved, premium saved", s._should_save_class("good", 65) and s._should_save_class("premium", 90))
-chk("keep_good on: review still follows the engine (not saved here)", not s._should_save_class("review", 50))
+ms.apply_crop_policy(s.cfg)
+chk("keep Good crops on: premium_only is switched off", s.cfg["quality_scoring"]["premium_only"] is False)
 s.cfg["merged"]["keep_good_crops"] = False
+ms.apply_crop_policy(s.cfg)
+import json as _json                                                       # noqa: E402
+_cfgdir = root / "cfg"; _cfgdir.mkdir()
+for keep, want in ((None, True), (False, True), (True, False)):
+    f = _cfgdir / f"s{keep}.json"
+    f.write_text(_json.dumps({} if keep is None else {"merged": {"keep_good_crops": keep}}))
+    loaded = ms.MergedSuite.__new__(ms.MergedSuite)._load_config(f)
+    chk(f"settings file with keep_good_crops={keep}: the engine's premium_only is {want}", loaded["quality_scoring"]["premium_only"] is want)
+chk("Tether Room no longer overrides the engine's save rule, guard or fast path",
+    not any(n in ms.MergedSuite.__dict__ for n in ("_should_save_class", "_assess_completeness", "_is_full_frame_runner", "_cut_by_frame",
+                                                   "detect_fence", "calculate_quality_score", "get_smart_crop", "_process_detection_results")))
+_saved_cfg = {k: dict(v) for k, v in core.DEFAULT_CONFIG.items()}
+try:
+    ms.check_engine()
+    core.DEFAULT_CONFIG["quality_scoring"].pop("premium_only"); core.DEFAULT_CONFIG["performance"].pop("fast_path")
+    try:
+        ms.check_engine(); _msg = ""
+    except RuntimeError as exc:
+        _msg = str(exc)
+    chk("an engine without the new settings is refused with the fix spelled out",
+        "premium_only" in _msg and "fast_path" in _msg and "fetch_deps.py --update" in _msg, _msg)
+finally:
+    for k, v in _saved_cfg.items():
+        core.DEFAULT_CONFIG[k] = v
+chk("an engine that has them is accepted", ms.check_engine() is None)
 
 # --- delete after delivery
 arr = np.random.default_rng(0).integers(0, 255, (300, 200, 3), dtype=np.uint8)
@@ -186,6 +233,10 @@ chk("...and are saved without touching other keys", r["saved"] and saved["perfor
 chk("the cut-off guard setting is applied and saved under completeness_guard",
     s.cfg["completeness_guard"]["edge_truncation_guard"] is False and saved["completeness_guard"] == {"edge_truncation_guard": False})
 chk("get_settings reports it", app.get_settings()["skip_cut_off"] is False)
+chk("the UI's Good-crops switch moves the engine's premium_only with it", s.cfg["quality_scoring"]["premium_only"] is False)
+app.set_settings(dict(good, keep_good=False))
+chk("...and back", s.cfg["quality_scoring"]["premium_only"] is True)
+app.set_settings(good)
 chk("it defaults to on when the page does not send it",
     app.set_settings({k: v for k, v in good.items() if k != "skip_cut_off"})["ok"] and s.cfg["completeness_guard"]["edge_truncation_guard"] is True)
 app.set_settings(good)

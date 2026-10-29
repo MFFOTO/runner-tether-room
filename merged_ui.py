@@ -35,7 +35,7 @@ import numpy as np
 
 import lut as lutlib
 import theme
-from merged_suite import MergedSuite, Pipeline
+from merged_suite import MergedSuite, Pipeline, apply_crop_policy
 
 PORT = 8770
 THUMB_H = 460
@@ -548,6 +548,7 @@ class App:
         cfg["selection_filters"]["premium_min_sharpness"] = sharp
         cfg["selection_filters"]["min_height_ratio"] = round(height_pct / 100.0, 4)
         cfg["merged"]["keep_good_crops"] = keep_good
+        apply_crop_policy(cfg)                 # the engine's premium_only follows the switch
         cfg["merged"]["delete_crops_after_delivery"] = delete_after
         saved = self._persist({
             "selection_filters": {"premium_min_sharpness": sharp,

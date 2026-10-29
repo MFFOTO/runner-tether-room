@@ -143,13 +143,9 @@
     "premium_batch_timeout_sec": 120,
     "keep_good_crops": false,
     "delete_crops_after_delivery": true,
-    "fast_path": true,
     "batch_folder_name_pattern": "{}",
     "stop_when_idle_sec": 0,
     "note_dir": "D:/ProLoad Bulk Loader/Release"
-  },
-  "completeness_guard": {
-    "edge_truncation_guard": true
   },
   "lut": {
     "enabled": true,

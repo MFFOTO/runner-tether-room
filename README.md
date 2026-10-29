@@ -31,6 +31,9 @@ this repo deliberately does not carry:
 | `luts/*.cube` | [runner-lut-suite](https://github.com/MFFOTO/runner-lut-suite) | the grades are their own project |
 
 Re-run `python fetch_deps.py --update` any time to pick up newer versions of both.
+Tether Room needs a crop engine that has `quality_scoring.premium_only`, `performance.fast_path` and
+`completeness_guard.edge_truncation_guard`. If yours is older, Tether Room says so at start-up and
+the fix is that same command.
 
 **For an NVIDIA GPU**, add the CUDA build of torch after setup:
 
@@ -66,8 +69,9 @@ there; nothing is uploaded anywhere and it works with no internet.
      so it cannot be Premium. The crop engine only checks the top edge, and its
      close-up path skips the check altogether, which let crops of a runner half
      out of the frame through as Premium. Also stops a close-up that touches the
-     top edge from taking that path. Uses `completeness_guard.edge_margin_px`
-     (6 px). Switch it off to get the engine's own behaviour back.
+     top edge from taking that path. This is the crop engine's own
+     `completeness_guard.edge_truncation_guard`, using `completeness_guard.edge_margin_px`
+     (6 px). Switch it off to get the old behaviour back.
    - *Delete each native-size crop once delivered*: on by default.
 
    All four can be changed while it runs; the next photo uses the new values.
@@ -141,8 +145,8 @@ row and its folder are the same string.
 
 Cropping a photo means decoding it (a 25 MP JPEG), finding the runners (YOLO), and
 then judging each runner it found: crop, measure sharpness, fence check, score. Most
-runners found are dropped, so most of the judging is wasted. **Fast path**
-(`merged.fast_path`, on by default) skips judging work whose result could not change
+runners found are dropped, so most of the judging is wasted. The crop engine's **fast path**
+(`performance.fast_path`, on by default) skips judging work whose result could not change
 what is saved:
 
 | skipped | when | why it cannot change the result |
@@ -152,8 +156,8 @@ what is saved:
 | the fence check | the best score it could get, assuming no fence, is still below the Premium line | a fence can only lower the score |
 | the whole-box sharpness figure | the sharpness metric is `subject` (the default) | it was only written to the report; `sharp_box` is blank there in fast mode |
 
-`test_fast_path.py` runs the engine's real per-photo loop on hundreds of random photos
-and settings with the fast path off and on, and requires the same crops to come out.
+The crop engine's own `test_fast_path.py` runs its real per-photo loop on hundreds of random
+photos and settings with the fast path off and on, and requires the same crops to come out.
 
 Measured through that loop on a 25 MP test photo (one test machine, synthetic
 photos; the ratios matter, not the milliseconds):
@@ -207,11 +211,11 @@ which is git-ignored so each machine keeps its own paths. Worth knowing:
 | key | meaning |
 |---|---|
 | `merged.premium_batch_size` | crops per folder (100) |
-| `merged.keep_good_crops` | `false` (default): only Premium crops are written. `true`: Good crops are also kept in `B_Good` in the work folder, undelivered |
-| `merged.fast_path` | `true` (default): skip work that cannot change what is saved (see *Speed*). `false` runs the engine exactly as it is |
+| `merged.keep_good_crops` | `false` (default): only Premium crops are written (the engine's `quality_scoring.premium_only`). `true`: Good crops are also kept in `B_Good` in the work folder, undelivered |
+| `performance.fast_path` | engine setting, `true` (default): skip work that cannot change what is saved (see *Speed*). `false` runs the engine exactly as it is |
 | `merged.delete_crops_after_delivery` | `true` (default): the native-size crop is removed from the work folder once its finished copy is delivered |
 | `selection_filters.premium_min_sharpness` | a crop softer than this cannot be Premium (180; 0 = off) |
-| `completeness_guard.edge_truncation_guard` | `true` (default): a runner cut by the photo's left/right edge cannot be Premium, and a close-up touching the left, right or top edge no longer bypasses the completeness check |
+| `completeness_guard.edge_truncation_guard` | engine setting, `true` (default): a runner cut by the photo's left/right edge cannot be Premium, and a close-up touching the left, right or top edge no longer bypasses the completeness check |
 | `selection_filters.min_height_ratio` | smallest runner, as a fraction of photo height (0.15) |
 | `merged.premium_batch_timeout_sec` | flush a short folder after this idle time |
 | `merged.note_dir` | where the delivery note goes. Ships as `D:/ProLoad Bulk Loader/Release` (the bulk loader reads it there); `""` puts it with the photos |
@@ -371,9 +375,10 @@ Notes:
   bytes as before.
 - `python test_grade.py` is a self-test that needs no photos. `python test_tether.py`
   does the same for Tether Room's metadata, Good-crop and cleanup handling, and the
-  crop settings (no GPU or crop engine needed). `python test_edge_guard.py` runs the
-  edge guard against the real, fetched crop engine (no model or GPU needed), and
-  `python test_fast_path.py` checks that the fast path saves exactly the same crops.
+  crop settings (no GPU or crop engine needed). `python test_engine_contract.py` checks that the
+  fetched crop engine has what Tether Room relies on and that the two work together
+  through the engine's real per-photo loop (no model or GPU needed). The edge guard, the fast
+  path, the EXIF copy and the fallback are tested in the crop engine's own repo.
 
 ## Licence
 

@@ -70,23 +70,8 @@ MERGED_CONFIG_EXTRA: Dict[str, Any] = {
         # Once a Premium crop's finished copy is written to the destination, remove
         # the native-size crop from the work folder. Crops that failed to deliver stay.
         "delete_crops_after_delivery": True,
-        # Skip work that cannot change what is saved: the fence check and scoring
-        # for a candidate that cannot reach the lowest class still being kept, and
-        # the whole-box sharpness figure that is only reported. Saves about 120 ms
-        # per candidate that would have been dropped anyway. Switch off to run the
-        # engine exactly as it is.
-        "fast_path": True,
         "note_dir": "",                 # where delivery.txt goes; "" -> with the photos
         "stop_when_idle_sec": 0,        # >0: exit after this long with nothing new (for tests)
-    },
-    "completeness_guard": {
-        # A runner whose box touches the photo's left or right edge is cut off
-        # by the frame, so it cannot be Premium. The engine only checks the top
-        # edge, and its close-up ("full-frame") path skips the check entirely.
-        # With this on, a box touching the left, right or top edge is judged
-        # like any other runner instead of taking the close-up path, and one
-        # cut at a side is demoted. Uses completeness_guard.edge_margin_px.
-        "edge_truncation_guard": True,
     },
     "lut": {
         "enabled": True,
@@ -110,6 +95,24 @@ def _is_candidate(name: str) -> bool:
     return any(lower.endswith(e) for e in _IMG_EXTS)
 
 
+def check_engine() -> None:
+    """The crop engine is fetched, not vendored, so it can be older than this Tether Room.
+    It must have the skip-the-fence-check fast path, the edge guard and premium_only."""
+    missing = [name for name, ok in (
+        ("quality_scoring.premium_only", "premium_only" in DEFAULT_CONFIG.get("quality_scoring", {})),
+        ("performance.fast_path", "fast_path" in DEFAULT_CONFIG.get("performance", {})),
+        ("completeness_guard.edge_truncation_guard", "edge_truncation_guard" in DEFAULT_CONFIG.get("completeness_guard", {}))) if not ok]
+    if missing:
+        raise RuntimeError("runner_suite_core.py is older than this Tether Room needs (it lacks "
+                           + ", ".join(missing) + "). Run:  python fetch_deps.py --update")
+
+
+def apply_crop_policy(cfg: Dict[str, Any]) -> None:
+    """Tether Room's one switch for Good crops, expressed in the engine's own setting:
+    only Premium crops are written unless the operator asked to keep Good ones."""
+    cfg["quality_scoring"]["premium_only"] = not bool(cfg["merged"].get("keep_good_crops", False))
+
+
 class MergedSuite(HighResRunnerSuite):
     # ------------------------------------------------------------------
     # config
@@ -124,6 +127,8 @@ class MergedSuite(HighResRunnerSuite):
                 print(f"[WARN] Could not read {path}: {exc}; using defaults.")
         else:
             print(f"[INFO] {path} not found; using defaults.")
+        check_engine()
+        apply_crop_policy(cfg)
         return cfg
 
     # ------------------------------------------------------------------
@@ -171,221 +176,31 @@ class MergedSuite(HighResRunnerSuite):
     # the run is shutting down instead of holding the grader thread forever.
     stop_event: Optional[threading.Event] = None
 
-    def _cut_by_frame(self, box: Any, img_shape: Any, top: bool = False) -> bool:
-        """True if the person box runs into the photo's left or right edge (or,
-        with top=True, its top edge): the athlete continues beyond the frame."""
-        cg = self.cfg.get("completeness_guard", {})
-        if not bool(cg.get("edge_truncation_guard", True)):
-            return False
-        h_img, w_img = img_shape[:2]
-        margin = float(cg.get("edge_margin_px", 6))
-        x1, y1, x2, _ = (float(v) for v in box[:4])
-        return x1 <= margin or x2 >= w_img - margin or (top and y1 <= margin)
-
-    def _is_full_frame_runner(self, box: Any, img_shape: Any) -> bool:
-        # The close-up path bypasses the safe zone, the keypoint minimum and the
-        # completeness guard. A close-up cut off by the frame must not use it.
-        full = False if self._cut_by_frame(box, img_shape, top=True) else super()._is_full_frame_runner(box, img_shape)
-        self._begin_candidate(box, full)           # first hook the engine calls for each candidate
-        return full
-
-    def _assess_completeness(self, kp: Any, person_box: Any, img_shape: Any) -> Dict[str, Any]:
-        comp = super()._assess_completeness(kp, person_box, img_shape)
-        if self._cut_by_frame(person_box, img_shape):
-            comp["truncated_side"] = True
-            if comp["ok_for_premium"]:
-                comp["ok_for_premium"] = False
-                comp["reason"] = "truncated_side"
-        return comp
-
-    # ------------------------------------------------------------------
-    # skip work that cannot change what is saved (merged.fast_path)
-    # ------------------------------------------------------------------
-    # The engine measures, fence-checks and scores every candidate before it
-    # decides whether the crop is worth keeping. Most candidates are dropped, so
-    # most of that work is wasted. Every rule below skips only work whose result
-    # could not change the outcome, and the tests run the engine's real loop both
-    # ways and require the same crops to come out. The hooks pass notes about the
-    # candidate being judged to each other through a per-thread scratch area.
-    _tl = threading.local()
-    _NEUTRAL_FENCE = {"fence_detected": False, "fence_score": 0.0, "vertical_line_count": 0,
-                      "person_occlusion_coverage": 0.0, "central_occlusion_score": 0.0,
-                      "vertical_line_coverage": 0.0}
-
-    def _fast_enabled(self) -> bool:
-        return bool(self.cfg["merged"].get("fast_path", True))
-
-    def _saveable_floor(self) -> Optional[float]:
-        """The lowest quality score at which a candidate could still be saved, or
-        None when pruning by score would not be exact (Good and Review crops are
-        both kept, so almost anything could be)."""
-        qs, keep_good = self.cfg["quality_scoring"], bool(self.cfg["merged"].get("keep_good_crops", False))
-        if keep_good and bool(qs.get("save_review", False)):
-            return None
-        classes = qs.get("classes", {})
-        return float(classes.get("good", 60) if keep_good else classes.get("premium", 73))
-
-    def _begin_candidate(self, box: Any, full: bool) -> None:
-        tl = self._tl
-        tl.cand, tl.full = box, full
-        tl.idx = getattr(tl, "n", 0); tl.n = tl.idx + 1
-        tl.kp = tl.sharp_subject = tl.sharp_box = tl.skip = tl.skip_reason = None
-        tl.box_skipped = False
-
-    def _process_detection_results(self, img: Any, img_path: Path, results: Any) -> None:
-        tl = self._tl
-        tl.img, tl.boxes, tl.confs, tl.cand, tl.n = img, None, None, None, 0
-        try:
-            r = results[0]
-            if r.boxes is not None and len(r.boxes):
-                tl.boxes = [tuple(map(float, row[:4])) for row in r.boxes.xyxy.cpu().numpy()]
-                tl.confs = r.boxes.conf.cpu().numpy() if r.boxes.conf is not None else None
-        except Exception:
-            tl.boxes = None                       # no notes: every rule then declines to skip
-        try:
-            return super()._process_detection_results(img, img_path, results)
-        finally:
-            tl.img = tl.boxes = tl.confs = tl.cand = None
-
-    def _try_whole_image_fallback(self, img: Any, img_path: Path, reason: str) -> None:
-        self._tl.cand = None                      # the fallback has no candidate: never skip inside it
-        return super()._try_whole_image_fallback(img, img_path, reason)
-
-    def get_smart_crop(self, img: Any, kp: Any, person_box: Any) -> Any:
-        # An incomplete runner is demoted by the completeness guard and then
-        # dropped, so measuring, fence-checking and scoring it is wasted effort.
-        tl = self._tl
-        if (self._fast_enabled() and tl.cand is person_box and self._saveable_floor() is not None
-                and bool(self.cfg.get("completeness_guard", {}).get("enabled", True))):
-            comp = self._assess_completeness(kp, person_box, img.shape[:2])
-            if not comp["ok_for_premium"]:
-                tl.skip_reason = "skipped_" + str(comp["reason"] or "partial_body")
-                self._inc("skipped_early_partial")
-                return None
-        return super().get_smart_crop(img, kp, person_box)
-
-    def get_sharpness_score(self, image: Any) -> float:
-        tl = self._tl
-        subject = str(self.cfg["selection_filters"].get("sharpness_metric", "subject")).lower() == "subject"
-        if self._fast_enabled() and subject and getattr(tl, "cand", None) is not None:
-            tl.box_skipped = True                 # only reported in this mode, never used to decide
-            return 0.0
-        v = super().get_sharpness_score(image)
-        if getattr(tl, "cand", None) is not None:
-            tl.sharp_box = v
-        return v
-
-    def get_subject_sharpness(self, img: Any, kp: Any, person_box: Any) -> float:
-        v = super().get_subject_sharpness(img, kp, person_box)
-        tl = self._tl
-        if getattr(tl, "cand", None) is person_box:
-            tl.kp, tl.sharp_subject = kp, v
-        return v
-
-    def _cannot_be_saved(self, crop_box: Any, person_box: Any) -> Optional[str]:
-        """Why this candidate cannot be saved whatever the fence check finds, or None."""
-        tl, sf = self._tl, self.cfg["selection_filters"]
-        subject = str(sf.get("sharpness_metric", "subject")).lower() == "subject"
-        sharp = tl.sharp_subject if subject else tl.sharp_box
-        if sharp is None:
-            return None
-        keep_good = bool(self.cfg["merged"].get("keep_good_crops", False))
-        premium_min = float(sf.get("premium_min_sharpness", 0))
-        if not keep_good and premium_min > 0 and sharp < premium_min:
-            return "soft"                         # cannot be Premium; Good crops are not kept
-        floor = self._saveable_floor()
-        if floor is None or tl.boxes is None or tl.idx >= len(tl.boxes):
-            return None
-        conf = float(tl.confs[tl.idx]) if tl.confs is not None and tl.idx < len(tl.confs) else 1.0
-        # A fence can only lower the score, so scoring as if there were none gives a
-        # ceiling. If even that is below the line, the fence check cannot rescue it.
-        ceiling = super().calculate_quality_score(
-            img=tl.img, crop_box=crop_box, person_box=person_box, kp=tl.kp, boxes=tl.boxes,
-            current_idx=tl.idx, sharpness=sharp, conf=conf, fence_info=self._NEUTRAL_FENCE,
-            is_full_frame=bool(tl.full))[0]
-        return "score" if ceiling < floor else None
-
-    def detect_fence(self, crop: Any, crop_box: Any, person_box: Any) -> Dict[str, Any]:
-        tl = self._tl
-        if self._fast_enabled() and getattr(tl, "cand", None) is person_box:
-            why = self._cannot_be_saved(crop_box, person_box)
-            if why:
-                tl.skip = why
-                self._inc("skipped_fence_" + why)
-                return dict(self._NEUTRAL_FENCE)
-        return super().detect_fence(crop, crop_box, person_box)
-
-    def calculate_quality_score(self, img: Any, crop_box: Any, person_box: Any, kp: Any, boxes: Any,
-                                current_idx: int, sharpness: float, conf: float,
-                                fence_info: Dict[str, Any], is_full_frame: bool) -> Any:
-        score, cls, details = super().calculate_quality_score(
-            img, crop_box, person_box, kp, boxes, current_idx, sharpness, conf, fence_info, is_full_frame)
-        tl = self._tl
-        if getattr(tl, "skip", None) and getattr(tl, "cand", None) is person_box:
-            # The fence check was skipped, so this score is a ceiling, not a verdict.
-            # It is below the line (or the crop is too soft), so the crop is dropped.
-            details["quality_class"] = "reject"
-            details["skipped_early"] = tl.skip
-            return score, "reject", details
-        return score, cls, details
-
-    def _report(self, row: Dict[str, Any]) -> None:
-        tl = self._tl
-        if getattr(tl, "skip_reason", None) and row.get("reason") == "crop_failed":
-            row["reason"] = tl.skip_reason         # say why, not "crop failed"
-            tl.skip_reason = None
-            self._inc("crop_failed", -1)
-        if getattr(tl, "box_skipped", False) and "sharp_box" in row:
-            row["sharp_box"] = ""                  # not measured in fast mode
-        super()._report(row)
-
-    def _should_save_class(self, quality_class: str, score: float) -> bool:
-        """Premium always; Good only if the operator asked to keep it. Anything
-        else is dropped before it is resized, sharpened, encoded or written, so
-        leaving Good crops out also saves that work."""
-        if quality_class == "premium":
-            return True
-        keep_good = bool(self.cfg["merged"].get("keep_good_crops", False))
-        if quality_class == "good":
-            return keep_good
-        return keep_good and super()._should_save_class(quality_class, score)
-
     # The engine calls this after every JPEG it writes: stage-1 crops (src is the
     # original photo), stage-2 deliveries (src is the stage-1 crop) and enhanced
-    # copies. Overriding it is what makes the two promises below hold for all of
-    # them, whichever path wrote the file:
-    #   * the original EXIF travels with the image, capture date included. It is
-    #     rebuilt rather than copied blind: Orientation goes (the pixels are
-    #     already rotated), as does the thumbnail of the uncropped original, and
-    #     the pixel dimensions are corrected. If a maker note is too big to fit,
-    #     only that is dropped. The base version swallowed every error silently.
-    #   * the file is tagged sRGB IEC61966-2.1.
+    # copies. The engine copies the EXIF (capture date included; it drops the
+    # orientation and the stale thumbnail and corrects the dimensions). What is
+    # added here is Tether Room's own: every file is tagged sRGB IEC61966-2.1, and
+    # a source that says it is not sRGB is reported once.
     def _copy_exif_without_orientation(self, src: Path, dst: Path, size: Optional[Tuple[int, int]] = None) -> bool:
-        """True if the EXIF (when wanted) and the profile are in the file. `size` is the
-        written image's (width, height) when the caller knows it; newer engines pass it."""
+        """True if the EXIF (when wanted) and the profile are in the file."""
+        wanted = gs.piexif is not None and bool(self.cfg["image_quality"].get("preserve_exif", True))
+        exif_ok = super()._copy_exif_without_orientation(src, dst, size)
         try:
             src_data = Path(src).read_bytes()
-            segs: List[bytes] = []
-            exif_dict = gs._load_exif(src_data)
-            if gs.piexif is not None and bool(self.cfg["image_quality"].get("preserve_exif", True)):
-                wh = size or gs.jpeg_size(dst)
-                if wh is None:
-                    raise ValueError("cannot read the size of the written JPEG")
-                exif = gs.build_exif(exif_dict, None, wh)
-                if exif:
-                    segs.append(gs.exif_segment(exif))
-                    if not gs.has_capture_date(exif):
-                        self._warn_once("nodate", f"{Path(dst).name} has no capture date in its EXIF "
-                                                  f"(the original had none either)")
-            self._check_source_colour(src_data, exif_dict, Path(src).name)
-            segs.append(gs.icc_segments(srgb.srgb_icc()))
-            out = gs.insert_segments(Path(dst).read_bytes(), *segs)
+            self._check_source_colour(src_data, gs._load_exif(src_data), Path(src).name)
+            dst_data = Path(dst).read_bytes()
+            written = gs._load_exif(dst_data) if (wanted and exif_ok) else None
+            if written is not None and not written.get("Exif", {}).get(gs.piexif.ExifIFD.DateTimeOriginal):
+                self._warn_once("nodate", f"{Path(dst).name} has no capture date in its EXIF "
+                                          f"(the original had none either)")
+            out = gs.insert_segments(dst_data, gs.icc_segments(srgb.srgb_icc()))
             tmp = Path(dst).with_name(Path(dst).name + ".part")
             tmp.write_bytes(out)
             os.replace(tmp, dst)
-            return True
+            return bool(exif_ok or not wanted)
         except Exception as exc:
-            print(f"\n[WARN] {Path(dst).name}: EXIF / colour profile not written ({exc})")
+            print(f"\n[WARN] {Path(dst).name}: colour profile not written ({exc})")
             return False
 
     def _warn_once(self, key: str, msg: str) -> None:
