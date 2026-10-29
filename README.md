@@ -47,7 +47,9 @@ by name on first run.
 run.bat
 ```
 
-Opens `http://127.0.0.1:8770/` in your browser. Everything is driven from
+Opens `http://127.0.0.1:8770/` in your browser. Every *Browse* dialog has a **New
+folder** button, so the output and delivery-note folders (or the folder to watch) can
+be created there instead of in File Explorer. Everything is driven from
 there; nothing is uploaded anywhere and it works with no internet.
 
 1. **Check the Crop settings** (right-hand side), then **choose the folder to

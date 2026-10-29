@@ -204,6 +204,25 @@ r = app2.resample()
 chk("Resample with nothing left keeps the samples instead of emptying them", r["ok"] and len(app2._samples) == n)
 
 
+# ---------------------------------------------------------------- new folder from the browser
+base = root / "browse"; base.mkdir()
+r = ui.App.make_folder(str(base), "  Finish line 1 ")
+chk("New folder: created inside the open folder, name trimmed",
+    r["ok"] and Path(r["path"]) == base / "Finish line 1" and (base / "Finish line 1").is_dir() and not r["existed"])
+r = ui.App.make_folder(str(base), "Finish line 1")
+chk("New folder: an existing name just opens it, nothing is overwritten", r["ok"] and r["existed"])
+(base / "Finish line 1" / "keep.txt").write_text("x")
+ui.App.make_folder(str(base), "Finish line 1")
+chk("...and its contents are untouched", (base / "Finish line 1" / "keep.txt").read_text() == "x")
+for name, why in [("", "empty"), ("   ", "blank"), (".", "dot"), ("..", "dot-dot"), ("a/b", "slash"), ("a\\b", "backslash"),
+                  ("..\\evil", "path escape"), ("C:x", "colon"), ("a*b", "star"), ('a"b', "quote"), ("con", "reserved name"),
+                  ("NUL.txt", "reserved name with extension"), ("name.", "trailing dot"), ("x" * 101, "too long")]:
+    chk(f"New folder refused: {why}", not ui.App.make_folder(str(base), name)["ok"])
+chk("...and none of them created anything outside or inside", sorted(p.name for p in base.iterdir()) == ["Finish line 1"]
+    and not (root / "evil").exists())
+chk("New folder needs a folder to be open first", not ui.App.make_folder("", "x")["ok"]
+    and not ui.App.make_folder(str(base / "missing"), "x")["ok"])
+
 print("\nFAILED:" if fails else "\nALL PASS", fails or "")
 _td.cleanup()
 sys.exit(1 if fails else 0)

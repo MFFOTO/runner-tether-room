@@ -115,6 +115,32 @@ class App:
         parent = str(p.parent) if p.parent != p else ""
         return {"path": str(p), "parent": parent, "dirs": dirs, "images": images}
 
+    _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                 *(f"LPT{i}" for i in range(1, 10))}
+
+    @classmethod
+    def make_folder(cls, parent: str, name: str) -> Dict[str, Any]:
+        """Create `name` inside `parent`, for the folder browser's New folder
+        button. One level only: the name may not contain a path."""
+        name = (name or "").strip()
+        if not parent or not Path(parent).is_dir():
+            return {"ok": False, "error": "open a folder first, then create the new one inside it"}
+        if not name or name in (".", ".."):
+            return {"ok": False, "error": "type a name for the new folder"}
+        if any(c in name for c in '\\/:*?"<>|') or any(ord(c) < 32 for c in name):
+            return {"ok": False, "error": 'a folder name cannot contain  \\ / : * ? " < > |'}
+        if name.endswith((".", " ")) or name.split(".")[0].upper() in cls._RESERVED:
+            return {"ok": False, "error": "Windows does not allow that name"}
+        if len(name) > 100:
+            return {"ok": False, "error": "that name is too long"}
+        target = Path(parent) / name
+        existed = target.is_dir()
+        try:
+            target.mkdir(exist_ok=True)
+        except OSError as exc:
+            return {"ok": False, "error": f"could not create the folder: {exc}"}
+        return {"ok": True, "path": str(target), "existed": existed}
+
     # ---------------- run control ----------------
     def start(self, watch: str) -> Dict[str, Any]:
         """Only the watched folder is needed to begin. Where the finished
@@ -732,6 +758,12 @@ figcaption{font-family:var(--mono);font-size:10px;color:var(--dim);overflow:hidd
 .bitem:hover{background:var(--panel-2)}
 .bfoot{display:flex;gap:10px;align-items:center;padding:13px 18px;background:var(--panel);
  border-top:1px solid var(--line);flex-wrap:wrap}
+.bnew{display:flex;gap:8px;align-items:center;padding:10px 18px;background:var(--panel-2);
+ border-top:1px solid var(--line)}
+.bnew[hidden]{display:none}
+.bnew input{flex:1;min-width:0;font:inherit;font-family:var(--mono);font-size:12.5px;background:var(--ground);
+ color:inherit;border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+.bnew input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .bfoot .cnt{font-family:var(--mono);font-size:11.5px;color:var(--muted);flex:1}
 .empty{color:var(--dim);font-family:var(--mono);font-size:12.5px;text-align:center;padding:20px 0}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
@@ -848,7 +880,12 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 <div class="scrim" id="browse"><div class="browser">
   <div class="bhead"><h2 id="btitle">Choose a folder</h2><div class="bpath" id="bpath">—</div></div>
   <div class="blist" id="blist"></div>
-  <div class="bfoot"><span class="cnt" id="bcnt"></span>
+  <div class="bnew" id="bnew" hidden>
+    <input id="bnewname" type="text" placeholder="New folder name" autocomplete="off" maxlength="100">
+    <button class="primary" id="bnewgo">Create</button>
+    <button class="quiet" id="bnewcancel">Cancel</button></div>
+  <div class="bfoot"><button class="quiet" id="bnewbtn" disabled>New folder&hellip;</button>
+    <span class="cnt" id="bcnt"></span>
     <button class="quiet" id="bcancel">Cancel</button>
     <button class="primary" id="buse">Use this folder</button></div>
 </div></div>
@@ -915,7 +952,7 @@ function openBrowse(which){target=which;
   nav((which==='watch'||which==='change') ? (ST.watch||'')
       : which==='note' ? (NOTEDIR||DEST||ST.out||'') : (DEST||ST.out||''));}
 function nav(p){ j('/api/browse?path='+encodeURIComponent(p)).then(d=>{
-  bpath=d.path; $('bpath').textContent=d.path||'This PC';
+  bpath=d.path; $('bnewbtn').disabled=!d.path||!!d.error; closeNew(); $('bpath').textContent=d.path||'This PC';
   $('bcnt').textContent = d.path ? (d.images+' JPEG'+(d.images===1?'':'s')+' here') : '';
   const L=$('blist'); L.innerHTML='';
   if(d.parent!==null&&d.path){const b=document.createElement('button');b.className='bitem';
@@ -926,6 +963,20 @@ function nav(p){ j('/api/browse?path='+encodeURIComponent(p)).then(d=>{
     b.textContent='▸  '+n;
     b.onclick=()=>nav(d.path?(d.path.replace(/[\\/]+$/,'')+'\\'+n):n);L.appendChild(b);});
 });}
+/* ---- new folder, from inside the browser ---- */
+function closeNew(){ $('bnew').hidden=true; $('bnewname').value=''; }
+$('bnewbtn').onclick=()=>{ $('bnew').hidden=false; $('bnewname').focus(); };
+$('bnewcancel').onclick=closeNew;
+function makeFolder(){
+  const name=$('bnewname').value;
+  j('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({parent:bpath,name:name})}).then(r=>{
+      if(!r.ok){ toast(r.error||'could not create the folder'); $('bnewname').focus(); return; }
+      toast(r.existed?'That folder already exists \u2014 opened it':'Created '+r.path);
+      nav(r.path); });}
+$('bnewgo').onclick=makeFolder;
+$('bnewname').addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();makeFolder();}
+  else if(e.key==='Escape'){e.stopPropagation();closeNew();} });
 function spotHint(){
   const v=($('jobspot').value||'').trim().replace(/[^A-Za-z0-9 _.-]/g,'');
   $('namehint').textContent = v
@@ -1223,6 +1274,9 @@ class Handler(BaseHTTPRequestHandler):
                 b.get("note_dir", ""), b.get("note_name", "")))
         elif u.path == "/api/workers":
             self._json(self.app.set_workers(self._body().get("n", 0)))
+        elif u.path == "/api/mkdir":
+            b = self._body()
+            self._json(self.app.make_folder(b.get("parent", ""), b.get("name", "")))
         elif u.path == "/api/settings":
             self._json(self.app.set_settings(self._body()))
         elif u.path == "/api/grading":
