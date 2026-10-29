@@ -83,7 +83,7 @@ there; nothing is uploaded anywhere and it works with no internet.
      cropping** continues exactly where it paused.
    - **Stop** ends cropping as soon as the photos in progress are done (seconds,
      not the whole backlog). The header then says what it is still waiting for,
-     for example *stopping, 3 photos in progress, 40 crops queued*. Queued crops
+     for example *stopping · 3 in progress · 40 queued*. Queued crops
      are delivered unless you press **Skip delivery**, in which case they stay in
      the work folder.
    - **Resume** (shown once stopped) starts again on the same folder where it
@@ -96,6 +96,13 @@ there; nothing is uploaded anywhere and it works with no internet.
    and description filled in; nothing is delivered until you confirm it, so a
    new event is never sent out under the old order by accident. After **Stop**
    it also serves as a way to start again, though **Resume** is the usual way.
+
+### Look
+
+The page opens in a light theme. The sun/moon button at the top right switches to a
+dark one (a deep blue-grey, not black) and the choice is remembered in that browser.
+Tether Room and Grade Room share one theme (`theme.py`), and photos are always shown
+on a dark surround in the full-size viewer because that is how they are judged.
 
 ## Output
 

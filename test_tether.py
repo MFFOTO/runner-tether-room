@@ -440,6 +440,45 @@ r2 = a2.resume()
 chk("Resume with nothing chosen before: runs, asks again for look and destination", r2["ok"] and not r2["restored"])
 a2.stop(); a2.thread.join(timeout=15)
 
+# ---------------------------------------------------------------- the look: one theme, both pages
+import re                                                         # noqa: E402
+import grade_ui                                                   # noqa: E402
+import theme                                                      # noqa: E402
+
+for name, page in (("Tether Room", ui.PAGE), ("Grade Room", grade_ui.PAGE)):
+    chk(f"{name}: every theme placeholder was filled", "@THEME" not in page)
+    chk(f"{name}: has the theme switch and sets the theme before first paint",
+        'id="th-btn"' in page and "data-theme" in page.split("</head>")[0])
+    used = set(re.findall(r"var\((--[a-z0-9-]+)", page))
+    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", theme.TOKENS))
+    chk(f"{name}: every colour variable it uses is defined", not (used - defined), sorted(used - defined))
+
+light_css, dark_css = theme.TOKENS.split(':root[data-theme="dark"]')
+def tokens(block):
+    return dict(re.findall(r"(--[a-z0-9-]+):\s*(#[0-9a-fA-F]{6})\b", block))
+L, D = tokens(light_css), tokens(dark_css)
+names = lambda block: set(re.findall(r"(--[a-z0-9-]+)\s*:", block))
+chk("the dark theme defines every colour the light one does", names(light_css) - {"--ui", "--mono", "--r", "--r-sm"} <= names(dark_css),
+    sorted(names(light_css) - names(dark_css)))
+
+def _lum(h):
+    c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+def contrast(a, b):
+    hi, lo = sorted((_lum(a), _lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+for tname, T in (("light", L), ("dark", D)):
+    for label, fg, bg, need in [("text on page", "--ink", "--ground", 4.5), ("text on panel", "--ink", "--panel", 4.5),
+                                ("secondary text on panel", "--muted", "--panel", 4.5), ("secondary text on page", "--muted", "--ground", 4.5),
+                                ("small labels on panel", "--dim", "--panel", 4.5), ("small labels on page", "--dim", "--ground", 4.5),
+                                ("button text on accent", "--accent-ink", "--accent", 4.5), ("button text on accent (hover)", "--accent-ink", "--accent-hi", 4.5),
+                                ("accent text on panel", "--accent", "--panel", 4.5), ("error text on panel", "--bad", "--panel", 4.5),
+                                ("warning text on panel", "--warn", "--panel", 4.5), ("status dot on panel", "--live", "--panel", 3.0)]:
+        c = contrast(T[fg], T[bg])
+        chk(f"contrast, {tname}: {label} is at least {need}:1", c >= need, f"{c:.2f}")
+
 print("\nFAILED:" if fails else "\nALL PASS", fails or "")
 _td.cleanup()
 sys.exit(1 if fails else 0)

@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 
 import lut as lutlib
+import theme
 from merged_suite import MergedSuite, Pipeline
 
 PORT = 8770
@@ -654,13 +655,11 @@ PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tether Room</title>
+<!--@THEME_HEAD@-->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
-:root{--ground:#141414;--panel:#1b1b1b;--panel-2:#222;--panel-3:#282828;--line:#2b2b2b;
- --line-hi:#3a3a3a;--ink:#ededed;--muted:#8c8c8c;--dim:#666;--accent:#e0a63c;
- --accent-ink:#171208;--accent-dim:#7a5c22;--live:#5bc98a;--bad:#e0645c;
- --ui:'Archivo',system-ui,sans-serif;--mono:'IBM Plex Mono',Consolas,monospace}
+/*@THEME_TOKENS@*/
 *{box-sizing:border-box}
 body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.5 var(--ui);
  -webkit-font-smoothing:antialiased}
@@ -834,15 +833,38 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 @media(max-width:560px){main{padding:16px}.sheet-body{grid-template-columns:1fr}
  .looks{max-height:140px;border-right:0;border-bottom:1px solid var(--line)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ---- Tether Room specifics ---- */
+.pill{display:inline-flex;align-items:center;gap:8px;padding:5px 13px 5px 11px;border-radius:999px;
+ background:var(--panel-3);border:1px solid var(--line);color:var(--muted)}
+body[data-s=running] .pill{background:var(--live-soft);border-color:var(--live-line);color:var(--accent)}
+body[data-s=paused] .pill,body[data-s=stopping] .pill,body[data-s=switching] .pill{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+body[data-s=error] .pill{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
+body[data-s=paused] .dot,body[data-s=stopping] .dot,body[data-s=switching] .dot{background:var(--warn);animation:none}
+.pill .state{color:inherit;letter-spacing:.06em;font-weight:500;white-space:nowrap}
+.hero{max-width:880px}
+.activity .log{max-height:300px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;box-shadow:var(--shadow);font-size:11.5px}
+.activity .log:empty::before{content:"Nothing yet.";color:var(--dim)}
+.hero .fld{padding:22px 24px}
+.hero .fld h3{font-size:22px;letter-spacing:-.015em;margin-top:8px}
+.steps{list-style:none;margin:6px 0 0;padding:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.steps li{display:flex;gap:12px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);
+ border-radius:var(--r);padding:14px 15px;box-shadow:var(--shadow)}
+.steps b{flex:none;width:26px;height:26px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
+ display:grid;place-items:center;font-family:var(--mono);font-size:12.5px}
+.steps h4{margin:1px 0 3px;font-size:14px}
+.steps p{margin:0;font-size:12.5px;color:var(--muted);line-height:1.45}
+@media(max-width:720px){.steps{grid-template-columns:1fr}}
+@media(max-width:1500px){.wctl .kicker{display:none}}
+/*@THEME_POLISH@*/
 </style></head><body>
 
 <div class="bar">
-  <div class="brand">Tether<span>·</span>Room</div>
-  <span class="dot" id="dot"></span><span class="state" id="statetext">loading</span>
+  <div class="brand">Tether Room</div>
+  <span class="pill" id="pill"><span class="dot" id="dot"></span><span class="state" id="statetext">loading</span></span>
   <span class="chip" id="lookchip" hidden><span class="sw" id="chipsw"></span>
     <b id="chipname"></b></span>
   <div class="spacer"></div>
-  <span class="wctl" id="wctl" hidden>
+  <span class="wctl" id="wctl" hidden title="Crop workers">
     <span class="kicker">crop workers</span>
     <button class="tiny" id="wdown" aria-label="fewer workers">&minus;</button>
     <b id="wnow">24</b>
@@ -852,14 +874,15 @@ td.mono{font-family:var(--mono);font-size:12.5px}
   <button class="quiet" id="pausebtn" hidden>Pause grading</button>
   <button class="quiet" id="changebtn" hidden>Change folder</button>
   <button class="quiet" id="skipbtn" hidden>Skip delivery</button>
-  <button class="quiet" id="stopbtn" disabled>Stop</button>
+  <button class="quiet danger" id="stopbtn" disabled>Stop</button>
   <button class="primary" id="resumebtn" hidden>Resume</button>
   <button class="primary" id="lookbtn" disabled>Change look</button>
+  <!--@THEME_TOGGLE@-->
 </div>
 
 <div class="wrap">
  <main>
-  <section class="setup" id="setup">
+  <section class="setup hero" id="setup">
     <div class="fld">
       <p class="kicker">To begin</p><h3>Which folder should I watch?</h3>
       <p style="margin:6px 0 0;color:var(--muted);font-size:13.5px">
@@ -872,6 +895,11 @@ td.mono{font-family:var(--mono);font-size:12.5px}
       <span class="hintx">Off: a stopped run carries on where it finished and skips photos already cropped.</span>
     </div>
     <div><button class="primary" id="startbtn" disabled>Start watching</button></div>
+    <ol class="steps">
+      <li><b>1</b><div><h4>Pick a folder</h4><p>Photos are cropped the moment they land from the camera.</p></div></li>
+      <li><b>2</b><div><h4>Choose a look</h4><p>Previewed on your own crops, applied batch by batch.</p></div></li>
+      <li><b>3</b><div><h4>Finished folders</h4><p>Graded, numbered, 100 to a folder, with a delivery note.</p></div></li>
+    </ol>
   </section>
 
   <div id="live" style="display:none">
@@ -902,6 +930,7 @@ td.mono{font-family:var(--mono);font-size:12.5px}
       <tr><td style="width:110px">Monitoring</td><td class="mono" id="t-watch">—</td></tr>
       <tr><td>Retouched</td><td class="mono" id="t-out">—</td></tr>
     </tbody></table>
+    <div class="activity"><p class="kicker" style="margin:22px 0 9px">Activity</p><div class="log" id="log"></div></div>
   </div>
  </main>
 
@@ -935,7 +964,6 @@ td.mono{font-family:var(--mono);font-size:12.5px}
       <div class="rate" id="r-skrow" hidden><span>already cropped</span><b id="r-sk">0</b></div>
       <div class="rate"><span>delivery note</span><b id="r-mf">not set</b></div>
     </div></div>
-  <div><p class="kicker" style="margin-bottom:9px">Activity</p><div class="log" id="log"></div></div>
  </aside>
 </div>
 
@@ -997,6 +1025,7 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 <div class="toast" id="toast"></div>
 
 <script>
+/*@THEME_JS@*/
 const $=id=>document.getElementById(id);
 let ST={}, LOOKS=[], sel=null, target=null, bpath='', openedAt=0, DEST='', NOTEDIR='', asked=false, GRADING=true;
 const j=(u,o)=>fetch(u,o).then(r=>r.json());
@@ -1202,10 +1231,11 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
   const running=s.status==='running';
   $('dot').className='dot'+(running?' on':(s.status==='error'?' err':''));
   $('statetext').textContent = s.switching ? 'switching folder'
-                             : s.stopping ? ('stopping \u2014 '+(s.in_flight||0)+' photo'+(s.in_flight===1?'':'s')
-                                 +' in progress, '+(s.queued||0)+' crop'+(s.queued===1?'':'s')+' queued')
+                             : s.stopping ? ('stopping \u00b7 '+(s.in_flight||0)+' in progress \u00b7 '+(s.queued||0)+' queued')
                              : (running&&s.cropping_on===false) ? 'cropping paused'
                              : s.status==='loading'?'loading model':s.status;
+  document.body.dataset.s = s.switching ? 'switching' : s.stopping ? 'stopping'
+    : (running&&s.cropping_on===false) ? 'paused' : (s.status||'ready');
   $('stopbtn').disabled=!running||!!s.switching||!!s.stopping;
   $('skipbtn').hidden=!(s.stopping&&(s.queued||0)>0);
   $('resumebtn').hidden=!(s.status==='stopped'&&!s.switching&&s.watch); $('lookbtn').disabled=!(s.luts&&s.luts.length);
@@ -1290,6 +1320,8 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
 tick();
 </script></body></html>
 """
+PAGE = theme.apply(PAGE)
+
 
 
 class Handler(BaseHTTPRequestHandler):

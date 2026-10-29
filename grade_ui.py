@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 
 import grade_suite as gs
+import theme
 import lut as lutlib
 
 DEFAULTS: Dict[str, Any] = {
@@ -395,11 +396,11 @@ PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Grade Room</title>
+<!--@THEME_HEAD@-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
-:root{--ground:#141414;--panel:#1b1b1b;--panel-2:#222;--panel-3:#282828;--line:#2b2b2b;
- --line-hi:#3a3a3a;--ink:#ededed;--muted:#8c8c8c;--dim:#666;--accent:#e0a63c;
- --accent-ink:#171208;--accent-dim:#7a5c22;--live:#5bc98a;--bad:#e0645c;
- --ui:'Segoe UI',system-ui,-apple-system,sans-serif;--mono:Consolas,'SF Mono',monospace}
+/*@THEME_TOKENS@*/
 *{box-sizing:border-box}
 body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.5 var(--ui);
  -webkit-font-smoothing:antialiased}
@@ -516,13 +517,23 @@ td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line)}td.mono{font-famil
 @media(max-width:760px){.look{grid-template-columns:1fr}.looks{max-height:150px;border-right:0;border-bottom:1px solid var(--line)}
  .row label.k{width:100%}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* ---- Grade Room specifics ---- */
+.pill{display:inline-flex;align-items:center;gap:8px;padding:5px 13px 5px 11px;border-radius:999px;
+ background:var(--panel-3);border:1px solid var(--line);color:var(--muted)}
+body[data-s=running] .pill,body[data-s=watching] .pill,body[data-s=building] .pill,body[data-s=starting] .pill{background:var(--live-soft);border-color:var(--live-line);color:var(--accent)}
+body[data-s=error] .pill{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
+.pill .state{color:inherit;letter-spacing:.06em;font-weight:500;white-space:nowrap}
+.val.empty{padding:8px 10px}  /* the generic .empty rule's 30px padding was stretching these boxes */
+.warn{background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--ink)}
+/*@THEME_POLISH@*/
 </style></head><body>
 <div class="bar">
-  <div class="brand">Grade<span>·</span>Room</div>
-  <span class="dot" id="dot"></span><span class="state" id="statetext">ready</span>
+  <div class="brand">Grade Room</div>
+  <span class="pill"><span class="dot" id="dot"></span><span class="state" id="statetext">ready</span></span>
   <div class="spacer"></div>
   <button class="quiet" id="stopbtn" hidden>Stop</button>
   <button class="primary" id="newbtn" hidden>New run</button>
+  <!--@THEME_TOGGLE@-->
 </div>
 <main>
  <section id="setup" style="display:grid;gap:16px">
@@ -625,6 +636,7 @@ td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line)}td.mono{font-famil
 <div class="toast" id="toast"></div>
 
 <script>
+/*@THEME_JS@*/
 const $=id=>document.getElementById(id);
 const j=(u,o)=>fetch(u,o).then(r=>r.json());
 const post=(u,b)=>j(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
@@ -821,6 +833,7 @@ function tick(){ j('/api/state').then(s=>{ ST=s;
   $('stopbtn').hidden=!active; $('newbtn').hidden=!(jb&&!active);
   $('dot').className='dot'+(active?' on':(jb&&jb.status==='error'?' err':''));
   $('statetext').textContent = jb?jb.status:'ready';
+  document.body.dataset.s = jb?jb.status:'ready';
   if(jb){
     $('head').textContent=HEAD[jb.status]||jb.status;
     $('n-done').textContent=fmt(jb.done); $('n-skip').textContent=fmt(jb.exists+jb.graded);
@@ -845,6 +858,8 @@ function tick(){ j('/api/state').then(s=>{ ST=s;
 paint(); tick();
 </script></body></html>
 """
+PAGE = theme.apply(PAGE)
+
 
 
 class Handler(BaseHTTPRequestHandler):
