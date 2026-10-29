@@ -61,6 +61,13 @@ there; nothing is uploaded anywhere and it works with no internet.
      Premium (engine default 180; 0 turns the check off).
    - *Runner at least (% of photo height)*: smaller runners are skipped. The
      engine also never accepts one under 220 px tall.
+   - *Skip runners cut off by the photo's edge*: on by default. A runner whose
+     box runs into the left or right edge of the photo is cut off by the frame,
+     so it cannot be Premium. The crop engine only checks the top edge, and its
+     close-up path skips the check altogether, which let crops of a runner half
+     out of the frame through as Premium. Also stops a close-up that touches the
+     top edge from taking that path. Uses `completeness_guard.edge_margin_px`
+     (6 px). Switch it off to get the engine's own behaviour back.
    - *Delete each native-size crop once delivered*: on by default.
 
    All four can be changed while it runs; the next photo uses the new values.
@@ -122,6 +129,7 @@ which is git-ignored so each machine keeps its own paths. Worth knowing:
 | `merged.keep_good_crops` | `false` (default): only Premium crops are written. `true`: Good crops are also kept in `B_Good` in the work folder, undelivered |
 | `merged.delete_crops_after_delivery` | `true` (default): the native-size crop is removed from the work folder once its finished copy is delivered |
 | `selection_filters.premium_min_sharpness` | a crop softer than this cannot be Premium (180; 0 = off) |
+| `completeness_guard.edge_truncation_guard` | `true` (default): a runner cut by the photo's left/right edge cannot be Premium, and a close-up touching the left, right or top edge no longer bypasses the completeness check |
 | `selection_filters.min_height_ratio` | smallest runner, as a fraction of photo height (0.15) |
 | `merged.premium_batch_timeout_sec` | flush a short folder after this idle time |
 | `merged.note_dir` | where the delivery note goes. Ships as `D:/ProLoad Bulk Loader/Release` (the bulk loader reads it there); `""` puts it with the photos |
@@ -271,7 +279,8 @@ Notes:
   bytes as before.
 - `python test_grade.py` is a self-test that needs no photos. `python test_tether.py`
   does the same for Tether Room's metadata, Good-crop and cleanup handling, and the
-  crop settings (no GPU or crop engine needed).
+  crop settings (no GPU or crop engine needed). `python test_edge_guard.py` runs the
+  edge guard against the real, fetched crop engine (no model or GPU needed).
 
 ## Licence
 

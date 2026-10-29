@@ -165,7 +165,7 @@ cfgfile.write_text(json.dumps({"performance": {"workers": 24}, "merged": {"note_
 app = ui.App.__new__(ui.App)
 app.config = str(cfgfile); app.suite = s; app.pipe = None
 s.cfg["merged"]["keep_good_crops"] = False
-good = {"keep_good": True, "delete_after": False, "premium_min_sharpness": "200", "min_height_pct": "18"}
+good = {"keep_good": True, "delete_after": False, "skip_cut_off": False, "premium_min_sharpness": "200", "min_height_pct": "18"}
 r = app.set_settings(good)
 chk("settings apply to the engine", r["ok"] and s.cfg["selection_filters"]["premium_min_sharpness"] == 200.0
     and s.cfg["selection_filters"]["min_height_ratio"] == 0.18 and s.cfg["merged"]["keep_good_crops"] is True
@@ -174,6 +174,12 @@ saved = json.loads(cfgfile.read_text())
 chk("...and are saved without touching other keys", r["saved"] and saved["performance"] == {"workers": 24}
     and saved["merged"]["note_dir"] == "D:/x" and saved["merged"]["keep_good_crops"] is True
     and saved["selection_filters"]["min_height_ratio"] == 0.18)
+chk("the cut-off guard setting is applied and saved under completeness_guard",
+    s.cfg["completeness_guard"]["edge_truncation_guard"] is False and saved["completeness_guard"] == {"edge_truncation_guard": False})
+chk("get_settings reports it", app.get_settings()["skip_cut_off"] is False)
+chk("it defaults to on when the page does not send it",
+    app.set_settings({k: v for k, v in good.items() if k != "skip_cut_off"})["ok"] and s.cfg["completeness_guard"]["edge_truncation_guard"] is True)
+app.set_settings(good)
 chk("get_settings reports them back (height as a percentage)",
     app.get_settings()["min_height_pct"] == 18.0 and app.get_settings()["premium_min_sharpness"] == 200.0)
 before = dict(s.cfg["selection_filters"])

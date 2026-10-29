@@ -473,6 +473,7 @@ class App:
         return {
             "keep_good": bool(m.get("keep_good_crops", False)),
             "delete_after": bool(m.get("delete_crops_after_delivery", True)),
+            "skip_cut_off": bool(cfg.get("completeness_guard", {}).get("edge_truncation_guard", True)),
             "premium_min_sharpness": float(sf.get("premium_min_sharpness", 0)),
             "min_height_pct": round(float(sf.get("min_height_ratio", 0.15)) * 100.0, 1),
             "min_box_height_px": int(sf.get("min_box_height_px", 220)),
@@ -493,7 +494,9 @@ class App:
         if not 1 <= height_pct <= 90:
             return {"ok": False, "error": "minimum runner height must be between 1 and 90 % of the photo"}
         keep_good, delete_after = bool(b.get("keep_good")), bool(b.get("delete_after"))
+        skip_cut_off = bool(b.get("skip_cut_off", True))
         cfg = self.suite.cfg
+        cfg.setdefault("completeness_guard", {})["edge_truncation_guard"] = skip_cut_off
         cfg["selection_filters"]["premium_min_sharpness"] = sharp
         cfg["selection_filters"]["min_height_ratio"] = round(height_pct / 100.0, 4)
         cfg["merged"]["keep_good_crops"] = keep_good
@@ -502,6 +505,7 @@ class App:
             "selection_filters": {"premium_min_sharpness": sharp,
                                   "min_height_ratio": round(height_pct / 100.0, 4)},
             "merged": {"keep_good_crops": keep_good, "delete_crops_after_delivery": delete_after},
+            "completeness_guard": {"edge_truncation_guard": skip_cut_off},
         })
         if self.pipe:
             self.pipe.note(
@@ -854,6 +858,8 @@ td.mono{font-family:var(--mono);font-size:12.5px}
     <div class="card cs" id="cs">
       <label><input type="checkbox" id="s-good"> Also keep Good crops</label>
       <span class="hintx" id="s-goodhint">Off: only Premium crops are saved at all.</span>
+      <label><input type="checkbox" id="s-cut"> Skip runners cut off by the photo&rsquo;s edge</label>
+      <span class="hintx">Left or right edge (and close-ups touching the top).</span>
       <label class="num"><span>Premium needs sharpness of at least</span>
         <input type="number" id="s-sharp" min="0" max="5000" step="10"></label>
       <span class="hintx">Engine default 180. 0 turns the check off.</span>
@@ -1021,7 +1027,7 @@ $('buse').onclick=()=>{ if(!bpath){toast('Pick a folder first');return;}
 /* ---- crop settings ---- */
 let CS_INIT=false;
 function fillSettings(c){ if(!c||c.premium_min_sharpness===undefined) return;
-  $('s-good').checked=!!c.keep_good; $('s-del').checked=!!c.delete_after;
+  $('s-good').checked=!!c.keep_good; $('s-del').checked=!!c.delete_after; $('s-cut').checked=!!c.skip_cut_off;
   $('s-sharp').value=c.premium_min_sharpness; $('s-height').value=c.min_height_pct;
   $('s-heighthint').textContent='Smaller runners are skipped (never under '+c.min_box_height_px+' px tall).';
   goodHint(); }
@@ -1031,7 +1037,7 @@ function goodHint(){ $('s-goodhint').textContent = $('s-good').checked
 $('s-good').addEventListener('change',goodHint);
 function applySettings(){
   return j('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({keep_good:$('s-good').checked,delete_after:$('s-del').checked,
+    body:JSON.stringify({keep_good:$('s-good').checked,delete_after:$('s-del').checked,skip_cut_off:$('s-cut').checked,
       premium_min_sharpness:$('s-sharp').value,min_height_pct:$('s-height').value})}).then(r=>{
     if(!r.ok){ toast(r.error||'could not apply the settings'); return false; }
     fillSettings(r.settings);

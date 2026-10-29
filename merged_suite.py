@@ -72,6 +72,15 @@ MERGED_CONFIG_EXTRA: Dict[str, Any] = {
         "note_dir": "",                 # where delivery.txt goes; "" -> with the photos
         "stop_when_idle_sec": 0,        # >0: exit after this long with nothing new (for tests)
     },
+    "completeness_guard": {
+        # A runner whose box touches the photo's left or right edge is cut off
+        # by the frame, so it cannot be Premium. The engine only checks the top
+        # edge, and its close-up ("full-frame") path skips the check entirely.
+        # With this on, a box touching the left, right or top edge is judged
+        # like any other runner instead of taking the close-up path, and one
+        # cut at a side is demoted. Uses completeness_guard.edge_margin_px.
+        "edge_truncation_guard": True,
+    },
     "lut": {
         "enabled": True,
         "lut_folder": "luts",          # folder of .cube files, relative to this repo
@@ -154,6 +163,33 @@ class MergedSuite(HighResRunnerSuite):
     # Set by the Pipeline: lets a blocking wait (the look picker) notice that
     # the run is shutting down instead of holding the grader thread forever.
     stop_event: Optional[threading.Event] = None
+
+    def _cut_by_frame(self, box: Any, img_shape: Any, top: bool = False) -> bool:
+        """True if the person box runs into the photo's left or right edge (or,
+        with top=True, its top edge): the athlete continues beyond the frame."""
+        cg = self.cfg.get("completeness_guard", {})
+        if not bool(cg.get("edge_truncation_guard", True)):
+            return False
+        h_img, w_img = img_shape[:2]
+        margin = float(cg.get("edge_margin_px", 6))
+        x1, y1, x2, _ = (float(v) for v in box[:4])
+        return x1 <= margin or x2 >= w_img - margin or (top and y1 <= margin)
+
+    def _is_full_frame_runner(self, box: Any, img_shape: Any) -> bool:
+        # The close-up path bypasses the safe zone, the keypoint minimum and the
+        # completeness guard. A close-up cut off by the frame must not use it.
+        if self._cut_by_frame(box, img_shape, top=True):
+            return False
+        return super()._is_full_frame_runner(box, img_shape)
+
+    def _assess_completeness(self, kp: Any, person_box: Any, img_shape: Any) -> Dict[str, Any]:
+        comp = super()._assess_completeness(kp, person_box, img_shape)
+        if self._cut_by_frame(person_box, img_shape):
+            comp["truncated_side"] = True
+            if comp["ok_for_premium"]:
+                comp["ok_for_premium"] = False
+                comp["reason"] = "truncated_side"
+        return comp
 
     def _should_save_class(self, quality_class: str, score: float) -> bool:
         """Premium always; Good only if the operator asked to keep it. Anything

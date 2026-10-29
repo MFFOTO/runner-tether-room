@@ -147,6 +147,9 @@
     "stop_when_idle_sec": 0,
     "note_dir": "D:/ProLoad Bulk Loader/Release"
   },
+  "completeness_guard": {
+    "edge_truncation_guard": true
+  },
   "lut": {
     "enabled": true,
     "lut_folder": "luts",
