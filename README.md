@@ -76,14 +76,26 @@ there; nothing is uploaded anywhere and it works with no internet.
    where the finished photos go, where the delivery note goes, the spot name,
    order number and description, and the look — previewed on *your* crops, with
    click-to-enlarge.
-3. From then on it runs by itself. **Change look**, **Pause grading** and the
-   **crop worker count** are all adjustable mid-run.
+3. From then on it runs by itself. **Change look**, **Pause grading**, **Pause
+   cropping** and the **crop worker count** are all adjustable mid-run.
+   - **Pause cropping** holds stage 1: photos already being cropped finish, the
+     rest wait, nothing is lost, and grading and delivery carry on. **Resume
+     cropping** continues exactly where it paused.
+   - **Stop** ends cropping as soon as the photos in progress are done (seconds,
+     not the whole backlog). The header then says what it is still waiting for,
+     for example *stopping, 3 photos in progress, 40 crops queued*. Queued crops
+     are delivered unless you press **Skip delivery**, in which case they stay in
+     the work folder.
+   - **Resume** (shown once stopped) starts again on the same folder where it
+     stopped: photos already cropped are skipped, and the destination, look and
+     order details from before are put back, so it carries on without asking
+     again.
 4. **Change folder** switches to a different monitored folder without closing
    the program. It finishes and delivers what is queued, then starts on the new
    folder. The setup sheet reopens with the last destination, spot, order number
    and description filled in; nothing is delivered until you confirm it, so a
    new event is never sent out under the old order by accident. After **Stop**
-   it also serves as a way to start again.
+   it also serves as a way to start again, though **Resume** is the usual way.
 
 ## Output
 
@@ -184,10 +196,20 @@ per photo to crop, ~55 ms per crop to grade, ~2.7 Premium crops per photo.
   keeps a small record (`_delivery_target.txt`) of where its crops were going.
   Leftover crops are resumed only for that same destination; any others are
   moved to `_previous_<date>` inside the work folder and never delivered.
-  Photos still in the watch folder are simply cropped again.
+- **Restarting carries on where it finished.** The work folder keeps
+  `_cropped.log`: one line per photo already cropped (its size, modified time and
+  path inside the watched folder). A restart, whether after Stop, a crash or a
+  closed program, skips those photos. A different photo that reuses an old file
+  name is cropped, because its size or time differs. To crop everything again,
+  tick *Crop photos again that an earlier run of this folder already cropped* on
+  the start screen (or pass `--recrop` on the command line), or delete
+  `_cropped.log`. Photos that were still waiting when Stop was pressed were never
+  cropped, so they are picked up on the next start.
 - **Stop** finishes the photos already in flight, delivers what can go out and
   exits. If there is no destination yet, grading is paused, or no look was
   chosen, the queued crops stay in the work folder instead of Stop waiting.
+  *Skip delivery* leaves without delivering the rest; they are offered again on
+  the next run for the same destination.
 
 ## Grade Room
 

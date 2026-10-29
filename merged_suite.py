@@ -565,7 +565,8 @@ class Pipeline:
     BACKOFF_BASE = 5.0
     BACKOFF_MAX = 60.0
 
-    def __init__(self, suite: MergedSuite, watch: Path, out: Optional[Path], work: Path):
+    def __init__(self, suite: MergedSuite, watch: Path, out: Optional[Path], work: Path,
+                 recrop: bool = False):
         self.s = suite
         self.watch = watch
         self.out = out
@@ -592,6 +593,24 @@ class Pipeline:
         self.stop_requested = threading.Event()
         self.stop = threading.Event()
         self.crops_done = 0
+        # Stage 1 can be paused without stopping the run (grading carries on).
+        self.cropping_on = threading.Event()
+        self.cropping_on.set()
+        # Stop asked to leave without delivering what is still queued; those
+        # crops stay in the work folder and are picked up again on the next run.
+        self.abandon = threading.Event()
+        self.finished = threading.Event()        # run() has fully wound down
+        self._in_flight = 0                      # photos being cropped right now
+        # Which photos were already cropped, kept on disk so a stopped or
+        # crashed run carries on where it left off instead of starting over.
+        self._ledger_path = work / self._CROP_LEDGER
+        self._ledger_lock = threading.Lock()
+        self._cropped_before: Set[str] = set()
+        self.skipped_known = 0                   # photos skipped because an earlier run did them
+        if recrop:
+            self._reset_ledger()
+        else:
+            self._load_ledger()
         self.batch_no = 1
         self.batches_done = 0        # folders actually delivered this run
         self._fail_counts: Dict[str, int] = {}   # crop path -> times it has failed
@@ -636,6 +655,51 @@ class Pipeline:
         self._sizes[key] = (size, streak)
         return streak >= self.stability
 
+    # -- which photos were already cropped ------------------------------
+    # One line per photo: size, modified time (ns) and path relative to the
+    # watched folder. Size and time are part of the key because cameras reuse
+    # file names when the counter restarts: a new IMG_0001.JPG is a new photo.
+    _CROP_LEDGER = "_cropped.log"
+
+    def _photo_key(self, p: Path) -> Optional[str]:
+        try:
+            st = p.stat()
+            rel = os.path.normcase(str(p.relative_to(self.watch)))
+        except (OSError, ValueError):
+            return None
+        return f"{st.st_size}\t{st.st_mtime_ns}\t{rel}"
+
+    def _load_ledger(self) -> None:
+        try:
+            for line in self._ledger_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.count("\t") >= 2 and line.split("\t", 2)[0].isdigit():   # a half-written last line is ignored
+                    self._cropped_before.add(line)
+        except OSError:
+            pass
+
+    def _reset_ledger(self) -> None:
+        try:
+            self._ledger_path.unlink()
+        except OSError:
+            pass
+
+    def _record_cropped(self, p: Path) -> None:
+        key = self._photo_key(p)
+        if key is None:
+            return
+        with self._ledger_lock:
+            try:
+                with open(self._ledger_path, "a", encoding="utf-8") as f:
+                    f.write(key + "\n")
+            except OSError as exc:
+                self._warn_ledger(exc)
+
+    def _warn_ledger(self, exc: Exception) -> None:
+        if not getattr(self, "_ledger_warned", False):
+            self._ledger_warned = True
+            print(f"[WARN] cannot record cropped photos in {self._ledger_path} ({exc}); "
+                  f"a restart will crop them again")
+
     def _scan(self) -> List[Path]:
         it = self.watch.rglob("*") if self.recursive else self.watch.glob("*")
         fresh = []
@@ -652,6 +716,12 @@ class Pipeline:
                         continue
                 except OSError:
                     continue
+                if self._cropped_before:
+                    key = self._photo_key(p)
+                    if key is not None and key in self._cropped_before:
+                        self.seen.add(str(p))
+                        self.skipped_known += 1
+                        continue
                 if self._stable(p):
                     self.seen.add(str(p))
                     fresh.append(p)
@@ -670,16 +740,26 @@ class Pipeline:
             self.last_premium = time.time()
 
     def _crop_one(self, p: Path) -> None:
+        # Paused: hold here, do not drop the photo. It is already marked as
+        # seen, so skipping it would lose it. Stop still gets through.
+        while not self.cropping_on.is_set() and not self.stop_requested.is_set():
+            time.sleep(0.2)
         if self.stop_requested.is_set():
             # A large backlog is one pool.map(); without this, Stop would wait
-            # for every photo in it. Skipped photos are still on disk in the
-            # watch folder and are cropped on the next run.
+            # for every photo in it. Skipped photos are not in the ledger, so
+            # the next run crops them.
             return
+        with self.lock:
+            self._in_flight += 1
         try:
             self.s.process_image(p)
         except Exception as exc:
             print(f"[ERROR] crop failed for {p.name}: {exc}")
             return
+        finally:
+            with self.lock:
+                self._in_flight -= 1
+        self._record_cropped(p)
         with self.lock:
             self.crops_done += 1
 
@@ -752,6 +832,9 @@ class Pipeline:
                 n = len(self.pending)
                 idle = time.time() - self.last_premium
             if stopping and n == 0:
+                return
+            if stopping and self.abandon.is_set():
+                self._abandon(n)                 # the operator chose not to wait for delivery
                 return
             if stopping and n and self._dest_fail_streak >= 3:
                 self._abandon(n)                 # the destination is not coming back
@@ -951,6 +1034,32 @@ class Pipeline:
         self.stop_requested.set()
         self.note("stopping -- finishing what is queued")
 
+    def set_cropping(self, on: bool) -> bool:
+        """Pause or resume stage 1. Photos already being cropped finish; the
+        rest wait, and nothing is lost. Grading and delivery carry on."""
+        if on:
+            self.cropping_on.set()
+            self.note("cropping resumed")
+        else:
+            self.cropping_on.clear()
+            self.note("cropping paused -- grading continues")
+        return on
+
+    def skip_delivery(self) -> None:
+        """While stopping: do not wait for the queued crops to be delivered.
+        They stay in the work folder and are offered again on the next run."""
+        self.abandon.set()
+        self.note("delivery skipped -- queued crops stay in the work folder")
+
+    @property
+    def in_flight(self) -> int:
+        with self.lock:
+            return self._in_flight
+
+    @property
+    def stopping(self) -> bool:
+        return self.stop_requested.is_set() and not self.finished.is_set()
+
     def set_grading(self, on: bool) -> bool:
         if on:
             self.grading_on.set()
@@ -1004,6 +1113,9 @@ class Pipeline:
                     self.active_workers = self.desired_workers
                     self.note(f"crop workers {old_n} -> {self.active_workers}")
                     print(f"[STAGE 1] crop workers {old_n} -> {self.active_workers}")
+                if not self.cropping_on.is_set():
+                    time.sleep(0.3)              # paused: pick up nothing new until resumed
+                    continue
                 fresh = self._scan()
                 if fresh:
                     self.last_arrival = time.time()
@@ -1025,6 +1137,7 @@ class Pipeline:
             pool.shutdown(wait=True)
             self.stop.set()
             grader.join(timeout=1800)
+            self.finished.set()
             secs = time.time() - t0
             print("\n" + "=" * 72)
             print("MERGED SUITE STOPPED")
@@ -1048,6 +1161,8 @@ def main() -> None:
     ap.add_argument("--batch", type=int, help="Premium crops per batch")
     ap.add_argument("--stop-idle", type=float,
                     help="exit after this many seconds with no new photos")
+    ap.add_argument("--recrop", action="store_true",
+                    help="crop photos again that an earlier run of this folder already cropped")
     ap.add_argument("--no-ask", action="store_true",
                     help="never prompt (fails if the folders are not configured)")
     args = ap.parse_args()
@@ -1063,7 +1178,7 @@ def main() -> None:
     interactive = not args.no_ask and sys.stdin is not None and sys.stdin.isatty()
     watch, out, work = suite.resolve_folders(args.watch, args.out, interactive)
     suite.init_lut()
-    Pipeline(suite, watch, out, work).run()
+    Pipeline(suite, watch, out, work, recrop=args.recrop).run()
 
 
 if __name__ == "__main__":

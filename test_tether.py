@@ -45,6 +45,9 @@ class _Base:
     def sharpen_image(self, img):
         return img
 
+    def _quality_folder_name(self, quality_class):
+        return {"premium": "A_Premium", "good": "B_Good"}.get(quality_class, "C_Review")
+
 
 core.HighResRunnerSuite = _Base
 sys.modules["runner_suite_core"] = core
@@ -57,8 +60,8 @@ import srgb                   # noqa: E402
 fails = []
 
 
-def chk(label, ok):
-    print(("PASS  " if ok else "FAIL  ") + label)
+def chk(label, ok, detail=None):
+    print(("PASS  " if ok else "FAIL  ") + label + (f"   [{detail}]" if detail is not None and not ok else ""))
     if not ok:
         fails.append(label)
 
@@ -85,10 +88,6 @@ ms_ = ms.MergedSuite.__new__(ms.MergedSuite)
 ms_.cfg = {"image_quality": {"preserve_exif": True}}
 
 fails = []
-def chk(label, ok):
-    print(("PASS  " if ok else "FAIL  ") + label)
-    if not ok: fails.append(label)
-
 # oversize EXIF (maker note > one JPEG segment) falls back instead of losing everything
 fb = gs.build_exif(big, None, (10, 10))
 chk("oversize maker note: block fits one segment and keeps the capture date",
@@ -243,6 +242,177 @@ finally:
     Path.is_dir = _real_is_dir
 chk("Browse: a protected entry is skipped, the rest still lists and no error is raised",
     "error" not in got and {"ok1", "ok2", "Finish line 1"} <= set(got["dirs"]) and "locked" not in got["dirs"] and got["images"] == 1)
+
+# ---------------------------------------------------------------- stop, pause, resume where it finished
+import os                                                         # noqa: E402
+import time                                                       # noqa: E402
+
+
+def fake_run(tag, nphotos=0, per_photo=0.05, recrop=False, root_=None, workers=8):
+    """A real Pipeline whose per-photo work is a fake that records what it saw."""
+    base = root_ or (root / tag)
+    watch, work = base / "watch", base / "work"
+    watch.mkdir(parents=True, exist_ok=True); work.mkdir(parents=True, exist_ok=True)
+    for i in range(nphotos):
+        f = watch / f"IMG_{i:04d}.jpg"
+        if not f.exists():
+            f.write_bytes(b"x" * (100 + i)); os.utime(f, (1_700_000_000 + i, 1_700_000_000 + i))
+    su = ms.MergedSuite.__new__(ms.MergedSuite)
+    su.cfg = {"merged": dict(ms.MERGED_CONFIG_EXTRA["merged"], poll_interval_sec=0.1, file_stability_checks=1),
+              "performance": {"workers": workers}}
+    su.output_folder = work; su.ui_mode = True; su._lut_asked = False; su._lut_name = None
+    su.cropped_names = []
+    su.process_image = lambda pth: (time.sleep(per_photo), su.cropped_names.append(pth.name))
+    return su, ms.Pipeline(su, watch, None, work, recrop=recrop), watch, work
+
+
+def run_in_thread(pipe):
+    t = threading.Thread(target=pipe.run, daemon=True); t.start(); return t
+
+
+def wait_for(cond, secs=10.0):
+    end = time.time() + secs
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+# 1. Stop mid-crop, then restart: carries on where it finished
+su, pipe, watch, work = fake_run("resume", nphotos=120, per_photo=0.2, workers=8)
+t = run_in_thread(pipe)
+wait_for(lambda: pipe.crops_done >= 20)
+t0 = time.time(); pipe.request_stop()
+chk("Stop: reports 'stopping' straight away", pipe.stopping)
+t.join(timeout=20)
+chk("Stop: cropping ends within about one photo's time, not after the backlog", not t.is_alive() and time.time() - t0 < 3.0)
+chk("Stop: state moves to finished, not stopping", pipe.finished.is_set() and not pipe.stopping)
+first_run = set(su.cropped_names)
+chk("Stop: only part of the folder was cropped", 20 <= len(first_run) < 120, len(first_run))
+chk("the ledger has exactly the photos that were cropped",
+    len((work / "_cropped.log").read_text().splitlines()) == len(first_run) == pipe.crops_done)
+
+su2, pipe2, _, _ = fake_run("resume", per_photo=0.01, root_=root / "resume")
+t = run_in_thread(pipe2)
+wait_for(lambda: pipe2.crops_done + len(first_run) >= 120)
+time.sleep(0.5); pipe2.request_stop(); t.join(timeout=20)
+second_run = set(su2.cropped_names)
+chk("restart: nothing cropped twice", not (first_run & second_run), sorted(first_run & second_run)[:3])
+chk("restart: together the two runs cropped every photo exactly once", first_run | second_run == {f"IMG_{i:04d}.jpg" for i in range(120)})
+chk("restart: reports how many it skipped", pipe2.skipped_known == len(first_run))
+
+# 2. a replaced file (same name, new content) and the re-crop option
+f0 = watch / "IMG_0000.jpg"; f0.write_bytes(b"new picture, same name"); os.utime(f0, (1_800_000_000, 1_800_000_000))
+su3, pipe3, _, _ = fake_run("resume", per_photo=0.0, root_=root / "resume")
+t = run_in_thread(pipe3); wait_for(lambda: pipe3.crops_done >= 1); time.sleep(0.4); pipe3.request_stop(); t.join(timeout=10)
+chk("a different photo with an old name is cropped, the rest are not", su3.cropped_names == ["IMG_0000.jpg"], su3.cropped_names)
+su4, pipe4, _, _ = fake_run("resume", per_photo=0.0, root_=root / "resume", recrop=True)
+t = run_in_thread(pipe4); wait_for(lambda: pipe4.crops_done >= 120); pipe4.request_stop(); t.join(timeout=20)
+chk("re-crop option: every photo is cropped again", len(set(su4.cropped_names)) == 120 and pipe4.skipped_known == 0)
+
+# 3. ledger robustness
+bad = root / "ledger"; (bad / "work").mkdir(parents=True)
+(bad / "work" / "_cropped.log").write_text("not a line\n12\t34\tIMG_0001.jpg\n99\t5", encoding="utf-8")   # junk + a half-written last line
+su5, pipe5, _, _ = fake_run("ledger", nphotos=2, root_=bad)
+chk("ledger: junk and a half-written last line are ignored, valid lines kept", pipe5._cropped_before == {"12\t34\tIMG_0001.jpg"})
+
+# 4. pause cropping: nothing lost, nothing cropped while paused, resumes cleanly
+su, pipe, watch, work = fake_run("pause", nphotos=40, per_photo=0.1, workers=4)
+t = run_in_thread(pipe); wait_for(lambda: pipe.crops_done >= 4)
+pipe.set_cropping(False); time.sleep(0.5)                          # in-flight ones finish
+n_at_pause = pipe.crops_done; time.sleep(1.0)
+chk("pause: cropping really stops (count is flat for a second)", pipe.crops_done == n_at_pause, (n_at_pause, pipe.crops_done))
+chk("pause: the run is still alive", t.is_alive() and not pipe.stopping)
+(watch / "late.jpg").write_bytes(b"x" * 7); time.sleep(0.6)
+chk("pause: a photo arriving meanwhile is not cropped yet", "late.jpg" not in su.cropped_names)
+pipe.set_cropping(True)
+chk("resume: everything, including the late arrival, is cropped, none twice",
+    wait_for(lambda: len(su.cropped_names) >= 41) and len(su.cropped_names) == len(set(su.cropped_names)) == 41)
+pipe.request_stop(); t.join(timeout=10)
+
+# 5. Stop while paused does not hang
+su, pipe, watch, work = fake_run("pause_stop", nphotos=30, per_photo=0.1, workers=4)
+t = run_in_thread(pipe); wait_for(lambda: pipe.crops_done >= 2); pipe.set_cropping(False); time.sleep(0.4)
+t0 = time.time(); pipe.request_stop(); t.join(timeout=10)
+chk("Stop while paused ends promptly", not t.is_alive() and time.time() - t0 < 3.0)
+
+# 6. Stop with a delivery queue: it drains, or is skipped on request
+def delivery_run(tag):
+    su, pipe, watch, work = fake_run(tag, nphotos=0)
+    out = root / tag / "out"; out.mkdir(); pipe.out = out
+    su._lut_asked = True; su._lut_name = "x.cube"
+    crops = []
+    for i in range(6):
+        c = work / f"c{i}.jpg"; c.write_bytes(b"x"); crops.append(c)
+    pipe.batch_size = 2; pipe._queued.update(str(c) for c in crops); pipe.pending = list(crops)
+    batches = []
+    def deliver(take, no, o):
+        time.sleep(0.6); batches.append(no); su.last_batch_failed = []; su.last_batch_faults = {}
+        su.last_batch_folder = str(no); su.last_batch_count = len(take); return len(take), 0
+    su.deliver_batch = deliver
+    return su, pipe, batches
+
+su, pipe, batches = delivery_run("drain")
+t = run_in_thread(pipe); time.sleep(0.2); pipe.request_stop(); t.join(timeout=30)
+chk("Stop: queued crops are still delivered by default (3 batches of 2)", len(batches) == 3 and not t.is_alive(), batches)
+su, pipe, batches = delivery_run("skip")
+t = run_in_thread(pipe); time.sleep(0.2); pipe.request_stop(); pipe.skip_delivery(); t.join(timeout=30)
+chk("Stop + skip delivery: leaves after the batch in progress, the rest stay queued on disk",
+    not t.is_alive() and len(batches) <= 1 and len(list((root / "skip" / "work").glob("c*.jpg"))) == 6, batches)
+
+# 7. the App layer: Stop, Resume (same event, same destination/look/job), skip delivery
+def make_app(tag):
+    base = root / tag; watch, work, out = base / "watch", base / "watch_crops", base / "out"
+    watch.mkdir(parents=True); out.mkdir(parents=True)
+    for i in range(30):
+        f = watch / f"IMG_{i:04d}.jpg"; f.write_bytes(b"x" * (50 + i)); os.utime(f, (1_700_000_000 + i,) * 2)
+    su = ms.MergedSuite.__new__(ms.MergedSuite)
+    su.cfg = {"merged": dict(ms.MERGED_CONFIG_EXTRA["merged"], poll_interval_sec=0.1, file_stability_checks=1),
+              "performance": {"workers": 4}, "lut": {"lut_folder": str(base)}, "paths": {}, "debug": {}}
+    su._lut_asked = False; su._lut_name = None; su.ui_mode = True
+    su.look_event = threading.Event(); su.cropped_names = []
+    su.process_image = lambda pth: (time.sleep(0.02), su.cropped_names.append(pth.name))
+    su.change_lut = lambda n: (setattr(su, "_lut_name", n), setattr(su, "_lut_asked", True), su.look_event.set(), True)[3]
+    su._available_luts = lambda: []
+    a = ui.App.__new__(ui.App)
+    a.config = str(base / "settings.json"); a.suite = su; a.pipe = None; a.thread = None
+    a.status = "ready"; a._switching = False; a.last_out = ""; a.error = ""; a.watch = a.out = ""
+    a.started_at = 0.0; a._tiles = {}; a._samples = []; a._sample_names = []; a._sample_lock = threading.Lock()
+    a._sampled_from = 0; a._warming = True; a.job = {"spot": "", "order": "", "desc": ""}
+    a._manifest_lock = threading.Lock(); a._manifest_lines = 0; a.note_dir = ""; a.note_name = "delivery.txt"
+    return a, su, watch, out
+
+a, su, watch, out = make_app("app")
+chk("cannot pause, skip or resume when nothing is running",
+    not a.set_cropping(False)["ok"] and not a.skip_delivery()["ok"] and not a.resume()["ok"])
+chk("start works", a.start(str(watch))["ok"] and a.status == "running")
+# destination, look and job as the operator would have set them
+a.pipe.out = out; su._lut_asked = True; su._lut_name = "grade.cube"
+a.last_out = str(out); a.out = str(out); a.job = {"spot": "finish", "order": "8765", "desc": "10k men"}
+chk("pause cropping through the App", a.set_cropping(False)["ok"] and not a.pipe.cropping_on.is_set())
+chk("...and resume it", a.set_cropping(True)["ok"] and a.pipe.cropping_on.is_set())
+wait_for(lambda: a.pipe.crops_done >= 5)
+chk("skip delivery is refused while not stopping", not a.skip_delivery()["ok"])
+a.stop()
+chk("state flags: stopping is reported while winding down or already finished",
+    a.pipe.stopping or a.pipe.finished.is_set())
+a.thread.join(timeout=15); first = len(su.cropped_names)
+chk("Stop ended the run, status is stopped", a.status == "stopped" and first < 30, first)
+r = a.resume()
+chk("Resume: starts a new run on the same folder", r["ok"] and a.status == "running" and a.watch == str(watch))
+chk("Resume: destination, look and job details are put back without asking again",
+    r["restored"] and a.pipe.out == out and su._lut_name == "grade.cube"
+    and a.job == {"spot": "finish", "order": "8765", "desc": "10k men"} and su.cfg["merged"]["batch_folder_prefix"] == "finish")
+wait_for(lambda: len(set(su.cropped_names)) >= 30)
+a.stop(); a.thread.join(timeout=15)
+chk("Resume: carries on where it stopped, every photo cropped exactly once",
+    len(su.cropped_names) == len(set(su.cropped_names)) == 30, (len(su.cropped_names), len(set(su.cropped_names))))
+a2, su2, w2, o2 = make_app("app3")
+a2.start(str(w2)); a2.stop(); a2.thread.join(timeout=15)
+r2 = a2.resume()
+chk("Resume with nothing chosen before: runs, asks again for look and destination", r2["ok"] and not r2["restored"])
+a2.stop(); a2.thread.join(timeout=15)
 
 print("\nFAILED:" if fails else "\nALL PASS", fails or "")
 _td.cleanup()

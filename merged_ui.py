@@ -145,7 +145,7 @@ class App:
         return {"ok": True, "path": str(target), "existed": existed}
 
     # ---------------- run control ----------------
-    def start(self, watch: str) -> Dict[str, Any]:
+    def start(self, watch: str, recrop: bool = False) -> Dict[str, Any]:
         """Only the watched folder is needed to begin. Where the finished
         photos go is asked for later, when there are crops to look at."""
         if self.status == "running":
@@ -161,7 +161,7 @@ class App:
         self.watch, self.out = str(w), ""
         self.suite.cfg["merged"]["stop_when_idle_sec"] = 0     # UI runs until stopped
         self.suite.ui_mode = True          # never prompt on stdin; wait for the page
-        self.pipe = Pipeline(self.suite, w, None, work)
+        self.pipe = Pipeline(self.suite, w, None, work, recrop=recrop)
         self.started_at = time.time()
         self.status = "running"
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -225,6 +225,42 @@ class App:
             self.pipe.request_stop()
         return {"ok": True}
 
+    def set_cropping(self, on: bool) -> Dict[str, Any]:
+        if not self.pipe or self.status != "running":
+            return {"ok": False, "error": "not running"}
+        self.pipe.set_cropping(bool(on))
+        return {"ok": True, "cropping_on": bool(on)}
+
+    def skip_delivery(self) -> Dict[str, Any]:
+        if not self.pipe or not self.pipe.stopping:
+            return {"ok": False, "error": "not stopping"}
+        self.pipe.skip_delivery()
+        return {"ok": True}
+
+    def resume(self) -> Dict[str, Any]:
+        """Start again on the same folder after Stop. Photos already cropped
+        are skipped (the work folder remembers them), and the destination, look
+        and job details from before are put back, so it carries on as it was
+        rather than asking again. It is the same event, not a new one."""
+        if self.status != "stopped" or self._switching:
+            return {"ok": False, "error": "nothing to resume"}
+        if not self.watch or not Path(self.watch).is_dir():
+            return {"ok": False, "error": "the monitored folder is gone"}
+        out, look, job = self.last_out, (self.suite._lut_name if self.suite else None), dict(self.job)
+        note_dir, note_name = self.note_dir, self.note_name
+        self.error = ""
+        res = self.start(self.watch)
+        if not res.get("ok"):
+            return res
+        restored = False
+        if out and look:
+            r = self.set_delivery(look, out, "", job.get("spot", ""), job.get("order", ""),
+                                  job.get("desc", ""), note_dir, note_name)
+            restored = bool(r.get("ok"))
+        if self.pipe:
+            self.pipe.note("resumed where it stopped" + ("" if restored else " -- choose the look and destination again"))
+        return {"ok": True, "restored": restored}
+
     # ---------------- state for the UI ----------------
     def state(self) -> Dict[str, Any]:
         s: Dict[str, Any] = {
@@ -236,6 +272,7 @@ class App:
             "asked": bool(self.suite._lut_asked) if self.suite else False,
             "batch_size": int(self.suite.cfg["merged"]["premium_batch_size"]) if self.suite else 100,
             "workers": int(self.suite.cfg["performance"].get("workers", 0)) if self.suite else 0,
+            "stopping": False, "cropping_on": True, "in_flight": 0, "known_skipped": 0,
         }
         p = self.pipe
         if p:
@@ -253,6 +290,10 @@ class App:
                 "grading_on": bool(getattr(p, "grading_on").is_set()) if hasattr(p, "grading_on") else True,
                 "want_workers": int(getattr(p, "desired_workers", 0)),
                 "log": list(getattr(p, "ui_log", []))[-12:],
+                "stopping": bool(p.stopping and self.status == "running"),
+                "cropping_on": bool(p.cropping_on.is_set()),
+                "in_flight": p.in_flight,
+                "known_skipped": p.skipped_known,
             })
         else:
             s.update({"cropped": 0, "queued": 0, "delivered": 0, "batches": 0,
@@ -644,6 +685,9 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 main{padding:22px;min-width:0}aside{border-left:1px solid var(--line);background:var(--panel);
  padding:20px 18px;display:flex;flex-direction:column;gap:20px;min-height:calc(100vh - 57px)}
 .setup{display:grid;gap:14px;max-width:760px}
+[hidden]{display:none!important}
+.recrop{display:flex;align-items:center;gap:9px;margin-top:12px;font-size:13px}
+.recrop+.hintx{display:block;margin:4px 0 0 26px}
 .cs{display:grid;gap:11px}
 .cs label{display:flex;align-items:center;gap:9px;font-size:13px;line-height:1.35}
 .cs label.num{justify-content:space-between}
@@ -801,9 +845,12 @@ td.mono{font-family:var(--mono);font-size:12.5px}
     <b id="wnow">24</b>
     <button class="tiny" id="wup" aria-label="more workers">+</button>
   </span>
+  <button class="quiet" id="cpausebtn" hidden>Pause cropping</button>
   <button class="quiet" id="pausebtn" hidden>Pause grading</button>
   <button class="quiet" id="changebtn" hidden>Change folder</button>
+  <button class="quiet" id="skipbtn" hidden>Skip delivery</button>
   <button class="quiet" id="stopbtn" disabled>Stop</button>
+  <button class="primary" id="resumebtn" hidden>Resume</button>
   <button class="primary" id="lookbtn" disabled>Change look</button>
 </div>
 
@@ -818,6 +865,8 @@ td.mono{font-family:var(--mono);font-size:12.5px}
         <b>Crop settings</b> on the right first: they are applied when you start.</p>
       <div class="row"><span class="val empty" id="watchval">no folder chosen</span>
         <button id="pickwatch">Browse&hellip;</button></div>
+      <label class="recrop"><input type="checkbox" id="recrop"> Crop photos again that an earlier run of this folder already cropped</label>
+      <span class="hintx">Off: a stopped run carries on where it finished and skips photos already cropped.</span>
     </div>
     <div><button class="primary" id="startbtn" disabled>Start watching</button></div>
   </section>
@@ -880,6 +929,7 @@ td.mono{font-family:var(--mono);font-size:12.5px}
       <div class="rate"><span>crop rate</span><b id="r-cr">—</b></div>
       <div class="rate"><span>premium/photo</span><b id="r-y">—</b></div>
       <div class="rate"><span>queue</span><b id="r-dr">—</b></div>
+      <div class="rate" id="r-skrow" hidden><span>already cropped</span><b id="r-sk">0</b></div>
       <div class="rate"><span>delivery note</span><b id="r-mf">not set</b></div>
     </div></div>
   <div><p class="kicker" style="margin-bottom:9px">Activity</p><div class="log" id="log"></div></div>
@@ -1050,10 +1100,22 @@ $('startbtn').onclick=()=>{ $('startbtn').disabled=true;
   applySettings().then(ok=>{
     if(!ok){ $('startbtn').disabled=false; return; }
     j('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({watch:ST.watch})}).then(r=>{
+      body:JSON.stringify({watch:ST.watch,recrop:$('recrop').checked})}).then(r=>{
         if(!r.ok){toast(r.error||'could not start');$('startbtn').disabled=false;}
         else toast('Watching '+ST.watch);});});};
-$('stopbtn').onclick=()=>{j('/api/stop',{method:'POST'}).then(()=>toast('Stopping after the queue drains'));};
+$('stopbtn').onclick=()=>{ $('stopbtn').disabled=true;
+  j('/api/stop',{method:'POST'}).then(()=>toast('Stopping \u2014 finishing the photos already being cropped')); };
+$('skipbtn').onclick=()=>{ j('/api/skip_delivery',{method:'POST'}).then(r=>{
+  toast(r.ok?'Not waiting for delivery \u2014 queued crops stay in the work folder':(r.error||'could not skip')); }); };
+$('resumebtn').onclick=()=>{ $('resumebtn').disabled=true;
+  j('/api/resume',{method:'POST'}).then(r=>{ $('resumebtn').disabled=false;
+    toast(r.ok?(r.restored?'Resumed where it stopped':'Resumed \u2014 choose the look and destination when crops appear'):(r.error||'could not resume')); }); };
+let CROPPING=true;
+$('cpausebtn').onclick=()=>{ const turnOn=!CROPPING;
+  j('/api/cropping',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({on:turnOn})}).then(r=>{
+      if(r.ok) toast(turnOn?'Cropping resumed':'Cropping paused \u2014 photos already being cropped finish; nothing is lost');
+      else toast(r.error||'could not change cropping'); }); };
 $('pausebtn').onclick=()=>{ const turnOn = !GRADING;
   j('/api/grading',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({on:turnOn})}).then(r=>{
@@ -1137,8 +1199,13 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
   const running=s.status==='running';
   $('dot').className='dot'+(running?' on':(s.status==='error'?' err':''));
   $('statetext').textContent = s.switching ? 'switching folder'
+                             : s.stopping ? ('stopping \u2014 '+(s.in_flight||0)+' photo'+(s.in_flight===1?'':'s')
+                                 +' in progress, '+(s.queued||0)+' crop'+(s.queued===1?'':'s')+' queued')
+                             : (running&&s.cropping_on===false) ? 'cropping paused'
                              : s.status==='loading'?'loading model':s.status;
-  $('stopbtn').disabled=!running||!!s.switching; $('lookbtn').disabled=!(s.luts&&s.luts.length);
+  $('stopbtn').disabled=!running||!!s.switching||!!s.stopping;
+  $('skipbtn').hidden=!(s.stopping&&(s.queued||0)>0);
+  $('resumebtn').hidden=!(s.status==='stopped'&&!s.switching&&s.watch); $('lookbtn').disabled=!(s.luts&&s.luts.length);
   $('changebtn').hidden = !((running||s.status==='stopped') && !s.switching);
   if(running||s.status==='stopped'){$('setup').style.display='none';$('live').style.display='block';}
   $('n-seen').textContent=fmt(s.seen); $('n-crop').textContent=fmt(s.cropped);
@@ -1185,7 +1252,13 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
       if($('chipsw').style.backgroundImage!==u) $('chipsw').style.backgroundImage=u;}
   } else chip.hidden=true;
   GRADING = s.grading_on !== false;
-  const pb=$('pausebtn'); pb.hidden=!running;
+  CROPPING = s.cropping_on !== false;
+  const cb=$('cpausebtn'); cb.hidden=!running||!!s.stopping;
+  cb.textContent = CROPPING ? 'Pause cropping' : 'Resume cropping';
+  cb.style.borderColor = CROPPING ? '' : 'var(--accent)';
+  cb.style.color = CROPPING ? '' : 'var(--accent)';
+  $('r-skrow').hidden=!(s.known_skipped>0); $('r-sk').textContent=fmt(s.known_skipped||0);
+  const pb=$('pausebtn'); pb.hidden=!running||!!s.stopping;
   pb.textContent = GRADING ? 'Pause grading' : 'Resume grading';
   pb.style.borderColor = GRADING ? '' : 'var(--accent)';
   pb.style.color = GRADING ? '' : 'var(--accent)';
@@ -1270,9 +1343,15 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/api/start":
             b = self._body()
-            self._json(self.app.start(b.get("watch", "")))
+            self._json(self.app.start(b.get("watch", ""), bool(b.get("recrop"))))
         elif u.path == "/api/stop":
             self._json(self.app.stop())
+        elif u.path == "/api/cropping":
+            self._json(self.app.set_cropping(bool(self._body().get("on", True))))
+        elif u.path == "/api/skip_delivery":
+            self._json(self.app.skip_delivery())
+        elif u.path == "/api/resume":
+            self._json(self.app.resume())
         elif u.path == "/api/change_watch":
             self._json(self.app.change_watch(self._body().get("watch", "")))
         elif u.path == "/api/look":
