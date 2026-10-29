@@ -105,10 +105,13 @@ class App:
         dirs, images = [], 0
         try:
             for c in sorted(p.iterdir(), key=lambda x: x.name.lower()):
-                if c.is_dir():
-                    dirs.append(c.name)
-                elif c.suffix.lower() in (".jpg", ".jpeg"):
-                    images += 1
+                try:
+                    if c.is_dir():
+                        dirs.append(c.name)
+                    elif c.suffix.lower() in (".jpg", ".jpeg"):
+                        images += 1
+                except OSError:
+                    continue        # one entry Windows will not describe (a protected folder)
         except OSError as exc:
             return {"path": path, "parent": str(p.parent), "dirs": [], "images": 0,
                     "error": str(exc)}
@@ -884,7 +887,7 @@ td.mono{font-family:var(--mono);font-size:12.5px}
     <input id="bnewname" type="text" placeholder="New folder name" autocomplete="off" maxlength="100">
     <button class="primary" id="bnewgo">Create</button>
     <button class="quiet" id="bnewcancel">Cancel</button></div>
-  <div class="bfoot"><button class="quiet" id="bnewbtn" disabled>New folder&hellip;</button>
+  <div class="bfoot"><button class="quiet" id="bnewbtn">New folder&hellip;</button>
     <span class="cnt" id="bcnt"></span>
     <button class="quiet" id="bcancel">Cancel</button>
     <button class="primary" id="buse">Use this folder</button></div>
@@ -952,7 +955,7 @@ function openBrowse(which){target=which;
   nav((which==='watch'||which==='change') ? (ST.watch||'')
       : which==='note' ? (NOTEDIR||DEST||ST.out||'') : (DEST||ST.out||''));}
 function nav(p){ j('/api/browse?path='+encodeURIComponent(p)).then(d=>{
-  bpath=d.path; $('bnewbtn').disabled=!d.path||!!d.error; closeNew(); $('bpath').textContent=d.path||'This PC';
+  bpath=d.path; closeNew(); $('bpath').textContent=d.path||'This PC';
   $('bcnt').textContent = d.path ? (d.images+' JPEG'+(d.images===1?'':'s')+' here') : '';
   const L=$('blist'); L.innerHTML='';
   if(d.parent!==null&&d.path){const b=document.createElement('button');b.className='bitem';
@@ -965,7 +968,9 @@ function nav(p){ j('/api/browse?path='+encodeURIComponent(p)).then(d=>{
 });}
 /* ---- new folder, from inside the browser ---- */
 function closeNew(){ $('bnew').hidden=true; $('bnewname').value=''; }
-$('bnewbtn').onclick=()=>{ $('bnew').hidden=false; $('bnewname').focus(); };
+$('bnewbtn').onclick=()=>{
+  if(!bpath){ toast('Open a drive or folder first (click D:\\ or a folder), then create the new folder inside it'); return; }
+  $('bnew').hidden=false; $('bnewname').focus(); };
 $('bnewcancel').onclick=closeNew;
 function makeFolder(){
   const name=$('bnewname').value;

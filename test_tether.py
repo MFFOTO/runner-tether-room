@@ -223,6 +223,21 @@ chk("...and none of them created anything outside or inside", sorted(p.name for 
 chk("New folder needs a folder to be open first", not ui.App.make_folder("", "x")["ok"]
     and not ui.App.make_folder(str(base / "missing"), "x")["ok"])
 
+# one entry the OS will not describe must not blank the listing
+(base / "ok1").mkdir(); (base / "ok2").mkdir(); (base / "locked").mkdir(); (base / "a.jpg").write_bytes(b"x")
+_real_is_dir = Path.is_dir
+def _fussy(self):
+    if self.name == "locked":
+        raise PermissionError(13, "Access is denied", str(self))
+    return _real_is_dir(self)
+Path.is_dir = _fussy
+try:
+    got = ui.App.browse(str(base))
+finally:
+    Path.is_dir = _real_is_dir
+chk("Browse: a protected entry is skipped, the rest still lists and no error is raised",
+    "error" not in got and {"ok1", "ok2", "Finish line 1"} <= set(got["dirs"]) and "locked" not in got["dirs"] and got["images"] == 1)
+
 print("\nFAILED:" if fails else "\nALL PASS", fails or "")
 _td.cleanup()
 sys.exit(1 if fails else 0)
