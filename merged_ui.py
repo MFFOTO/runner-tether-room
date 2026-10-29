@@ -244,6 +244,7 @@ class App:
         s["note_dir"] = self.note_dir
         s["note_name"] = self.note_name
         s["manifest_lines"] = self._manifest_lines
+        s["settings"] = self.get_settings()
         return s
 
     def _session_crops(self) -> List[Path]:
@@ -267,9 +268,15 @@ class App:
             files = self._session_crops()
             if not files:
                 return False
-            grown = len(files) >= self._sampled_from * 2
+            total = len(files)
+            grown = total >= self._sampled_from * 2
             if self._samples and not force and not grown:
                 return True
+            # Delivered crops may already be gone from the work folder; draw
+            # from what is left, and keep showing the old samples if nothing is.
+            files = [f for f in files if f.exists()]
+            if not files:
+                return bool(self._samples)
             idx = np.linspace(0, len(files) - 1, min(SAMPLES, len(files))).round().astype(int)
             picked, names = [], []
             for i in sorted(set(idx.tolist())):
@@ -283,7 +290,7 @@ class App:
             if not picked:
                 return False
             self._samples, self._sample_names = picked, names
-            self._sampled_from = len(files)
+            self._sampled_from = total
             self._tiles = {}                 # cached tiles were of the old crops
         self._warm_rail()
         return True
@@ -373,7 +380,6 @@ class App:
         return {"ok": True, "grading_on": bool(on)}
 
     def resample(self) -> Dict[str, Any]:
-        self.reset_samples()
         ok = self._load_samples(force=True)
         return {"ok": ok, "samples": list(self._sample_names)}
 
@@ -428,6 +434,69 @@ class App:
                  "desc": (desc or "").strip().replace("\t", " ")}
         self.job = clean
 
+    # ---------------- crop settings ----------------
+    def get_settings(self) -> Dict[str, Any]:
+        """The settings the page can change, as the engine holds them now."""
+        if not self.suite:
+            return {}
+        cfg = self.suite.cfg
+        sf, m = cfg["selection_filters"], cfg["merged"]
+        return {
+            "keep_good": bool(m.get("keep_good_crops", False)),
+            "delete_after": bool(m.get("delete_crops_after_delivery", True)),
+            "premium_min_sharpness": float(sf.get("premium_min_sharpness", 0)),
+            "min_height_pct": round(float(sf.get("min_height_ratio", 0.15)) * 100.0, 1),
+            "min_box_height_px": int(sf.get("min_box_height_px", 220)),
+        }
+
+    def set_settings(self, b: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate, apply to the running engine (the next photo already uses
+        them) and write them back to the settings file so they stick."""
+        if not self.suite:
+            return {"ok": False, "error": "still loading the model"}
+        try:
+            sharp = float(b.get("premium_min_sharpness"))
+            height_pct = float(b.get("min_height_pct"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "a number field is not a number"}
+        if not 0 <= sharp <= 5000:
+            return {"ok": False, "error": "Premium sharpness must be between 0 (off) and 5000"}
+        if not 1 <= height_pct <= 90:
+            return {"ok": False, "error": "minimum runner height must be between 1 and 90 % of the photo"}
+        keep_good, delete_after = bool(b.get("keep_good")), bool(b.get("delete_after"))
+        cfg = self.suite.cfg
+        cfg["selection_filters"]["premium_min_sharpness"] = sharp
+        cfg["selection_filters"]["min_height_ratio"] = round(height_pct / 100.0, 4)
+        cfg["merged"]["keep_good_crops"] = keep_good
+        cfg["merged"]["delete_crops_after_delivery"] = delete_after
+        saved = self._persist({
+            "selection_filters": {"premium_min_sharpness": sharp,
+                                  "min_height_ratio": round(height_pct / 100.0, 4)},
+            "merged": {"keep_good_crops": keep_good, "delete_crops_after_delivery": delete_after},
+        })
+        if self.pipe:
+            self.pipe.note(
+                f"crop settings: Premium sharpness >= {sharp:g}, runner >= {height_pct:g}% of height, "
+                f"Good crops {'kept' if keep_good else 'not saved'}")
+        return {"ok": True, "saved": saved, "settings": self.get_settings()}
+
+    def _persist(self, updates: Dict[str, Dict[str, Any]]) -> bool:
+        """Merge `updates` into the settings file, touching nothing else.
+        False if the file could not be written (the settings still apply for
+        this session)."""
+        path = Path(self.config)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            for section, values in updates.items():
+                data.setdefault(section, {}).update(values)
+            tmp = path.with_name(path.name + ".part")
+            tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(path)
+            return True
+        except Exception as exc:
+            print(f"[WARN] could not save crop settings to {path}: {exc}")
+            return False
+
     def set_workers(self, n: Any) -> Dict[str, Any]:
         if not self.pipe:
             return {"ok": False, "error": "not running"}
@@ -456,7 +525,7 @@ class App:
             return {"ok": False, "error": "that is the folder being monitored"}
         # One name, two uses: the spot names the batch folders and opens each
         # row of the delivery note. Asking twice let them drift apart.
-        clean = "".join(c for c in (spot or "").strip() if c not in '\/:*?"<>|')
+        clean = "".join(c for c in (spot or "").strip() if c not in '\\/:*?"<>|')
         was = str(self.suite.cfg["merged"].get("batch_folder_prefix", ""))
         self.suite.cfg["merged"]["batch_folder_prefix"] = clean
         if clean != was and self.pipe is not None:
@@ -542,6 +611,14 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 main{padding:22px;min-width:0}aside{border-left:1px solid var(--line);background:var(--panel);
  padding:20px 18px;display:flex;flex-direction:column;gap:20px;min-height:calc(100vh - 57px)}
 .setup{display:grid;gap:14px;max-width:760px}
+.cs{display:grid;gap:11px}
+.cs label{display:flex;align-items:center;gap:9px;font-size:13px;line-height:1.35}
+.cs label.num{justify-content:space-between}
+.cs input[type=number]{width:78px;font:inherit;font-family:var(--mono);font-size:12.5px;background:var(--ground);
+ color:inherit;border:1px solid var(--line);border-radius:6px;padding:5px 7px;text-align:right}
+.cs input[type=number]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.cs .hintx{display:block;margin:-6px 0 0 26px}
+.cs .cs-foot{display:flex;align-items:center;gap:10px}
 .fld{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:14px 16px}
 .fld h3{margin:6px 0 0;font-size:15px}
 .fld .row{display:flex;gap:10px;align-items:center;margin-top:10px}
@@ -698,7 +775,8 @@ td.mono{font-family:var(--mono);font-size:12.5px}
       <p class="kicker">To begin</p><h3>Which folder should I watch?</h3>
       <p style="margin:6px 0 0;color:var(--muted);font-size:13.5px">
         Photos are cropped as they land. Once the first crops appear I&rsquo;ll ask
-        which look to apply and where to save the finished photos.</p>
+        which look to apply and where to save the finished photos. Check the
+        <b>Crop settings</b> on the right first: they are applied when you start.</p>
       <div class="row"><span class="val empty" id="watchval">no folder chosen</span>
         <button id="pickwatch">Browse&hellip;</button></div>
     </div>
@@ -737,6 +815,20 @@ td.mono{font-family:var(--mono);font-size:12.5px}
  </main>
 
  <aside>
+  <div><p class="kicker" style="margin-bottom:9px">Crop settings</p>
+    <div class="card cs" id="cs">
+      <label><input type="checkbox" id="s-good"> Also keep Good crops</label>
+      <span class="hintx" id="s-goodhint">Off: only Premium crops are saved at all.</span>
+      <label class="num"><span>Premium needs sharpness of at least</span>
+        <input type="number" id="s-sharp" min="0" max="5000" step="10"></label>
+      <span class="hintx">Engine default 180. 0 turns the check off.</span>
+      <label class="num"><span>Runner at least (% of photo height)</span>
+        <input type="number" id="s-height" min="1" max="90" step="1"></label>
+      <span class="hintx" id="s-heighthint">Smaller runners are skipped.</span>
+      <label><input type="checkbox" id="s-del"> Delete each native-size crop once delivered</label>
+      <div class="cs-foot"><button class="primary" id="s-apply">Apply</button>
+        <span class="hintx" id="s-state">applies to the next photo</span></div>
+    </div></div>
   <div><p class="kicker" style="margin-bottom:9px">Applied look</p>
     <div class="card look"><img class="look-img" id="side-img" alt="" style="display:none">
       <div class="look-body"><h3 id="side-name">None yet</h3>
@@ -870,12 +962,35 @@ $('buse').onclick=()=>{ if(!bpath){toast('Pick a folder first');return;}
   else {DEST=bpath;$('destval').textContent=bpath;$('destval').classList.remove('empty');}
   $('browse').classList.remove('on');};
 
+/* ---- crop settings ---- */
+let CS_INIT=false;
+function fillSettings(c){ if(!c||c.premium_min_sharpness===undefined) return;
+  $('s-good').checked=!!c.keep_good; $('s-del').checked=!!c.delete_after;
+  $('s-sharp').value=c.premium_min_sharpness; $('s-height').value=c.min_height_pct;
+  $('s-heighthint').textContent='Smaller runners are skipped (never under '+c.min_box_height_px+' px tall).';
+  goodHint(); }
+function goodHint(){ $('s-goodhint').textContent = $('s-good').checked
+  ? 'On: Good crops are saved to B_Good in the work folder, not delivered.'
+  : 'Off: only Premium crops are saved at all.'; }
+$('s-good').addEventListener('change',goodHint);
+function applySettings(){
+  return j('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({keep_good:$('s-good').checked,delete_after:$('s-del').checked,
+      premium_min_sharpness:$('s-sharp').value,min_height_pct:$('s-height').value})}).then(r=>{
+    if(!r.ok){ toast(r.error||'could not apply the settings'); return false; }
+    fillSettings(r.settings);
+    $('s-state').textContent = r.saved ? 'applied and saved' : 'applied (could not be saved to the file)';
+    return true; });}
+$('s-apply').onclick=()=>{ applySettings().then(ok=>{ if(ok) toast('Crop settings applied'); }); };
+
 /* ---- start / stop ---- */
 $('startbtn').onclick=()=>{ $('startbtn').disabled=true;
-  j('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({watch:ST.watch})}).then(r=>{
-      if(!r.ok){toast(r.error||'could not start');$('startbtn').disabled=false;}
-      else toast('Watching '+ST.watch);});};
+  applySettings().then(ok=>{
+    if(!ok){ $('startbtn').disabled=false; return; }
+    j('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({watch:ST.watch})}).then(r=>{
+        if(!r.ok){toast(r.error||'could not start');$('startbtn').disabled=false;}
+        else toast('Watching '+ST.watch);});});};
 $('stopbtn').onclick=()=>{j('/api/stop',{method:'POST'}).then(()=>toast('Stopping after the queue drains'));};
 $('pausebtn').onclick=()=>{ const turnOn = !GRADING;
   j('/api/grading',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -956,6 +1071,7 @@ addEventListener('keydown',e=>{if(e.key!=='Escape')return;
 const fmt=n=>Number(n||0).toLocaleString('en-US');
 function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch||s.watch,out:ST.out||s.out});
   LOOKS=s.luts||[];
+  if(!CS_INIT&&s.settings&&s.settings.premium_min_sharpness!==undefined){ fillSettings(s.settings); CS_INIT=true; }
   const running=s.status==='running';
   $('dot').className='dot'+(running?' on':(s.status==='error'?' err':''));
   $('statetext').textContent = s.switching ? 'switching folder'
@@ -1107,6 +1223,8 @@ class Handler(BaseHTTPRequestHandler):
                 b.get("note_dir", ""), b.get("note_name", "")))
         elif u.path == "/api/workers":
             self._json(self.app.set_workers(self._body().get("n", 0)))
+        elif u.path == "/api/settings":
+            self._json(self.app.set_settings(self._body()))
         elif u.path == "/api/grading":
             self._json(self.app.set_grading(bool(self._body().get("on", True))))
         elif u.path == "/api/resample":

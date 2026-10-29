@@ -50,7 +50,19 @@ run.bat
 Opens `http://127.0.0.1:8770/` in your browser. Everything is driven from
 there; nothing is uploaded anywhere and it works with no internet.
 
-1. **Choose the folder to watch.** Cropping starts immediately.
+1. **Check the Crop settings** (right-hand side), then **choose the folder to
+   watch.** Cropping starts immediately, using those settings:
+   - *Also keep Good crops*: off by default, meaning only Premium crops are
+     saved at all. On, Good crops are also saved (to `B_Good` in the work
+     folder) but are still never delivered.
+   - *Premium needs sharpness of at least*: a crop softer than this cannot be
+     Premium (engine default 180; 0 turns the check off).
+   - *Runner at least (% of photo height)*: smaller runners are skipped. The
+     engine also never accepts one under 220 px tall.
+   - *Delete each native-size crop once delivered*: on by default.
+
+   All four can be changed while it runs; the next photo uses the new values.
+   They are saved to `settings_merged.json`, so the next start remembers them.
 2. **When the first crops appear**, one dialog asks for everything at once:
    where the finished photos go, where the delivery note goes, the spot name,
    order number and description, and the look — previewed on *your* crops, with
@@ -105,6 +117,10 @@ which is git-ignored so each machine keeps its own paths. Worth knowing:
 | key | meaning |
 |---|---|
 | `merged.premium_batch_size` | crops per folder (100) |
+| `merged.keep_good_crops` | `false` (default): only Premium crops are written. `true`: Good crops are also kept in `B_Good` in the work folder, undelivered |
+| `merged.delete_crops_after_delivery` | `true` (default): the native-size crop is removed from the work folder once its finished copy is delivered |
+| `selection_filters.premium_min_sharpness` | a crop softer than this cannot be Premium (180; 0 = off) |
+| `selection_filters.min_height_ratio` | smallest runner, as a fraction of photo height (0.15) |
 | `merged.premium_batch_timeout_sec` | flush a short folder after this idle time |
 | `merged.note_dir` | where the delivery note goes. Ships as `D:/ProLoad Bulk Loader/Release` (the bulk loader reads it there); `""` puts it with the photos |
 | `merged.recursive` | watch subfolders too — on, for per-card folders |
@@ -135,7 +151,12 @@ per photo to crop, ~55 ms per crop to grade, ~2.7 Premium crops per photo.
 ## Notes
 
 - The work folder (native-size crops) is created next to the watched folder and
-  is never written inside it, so crops are not re-ingested.
+  is never written inside it, so crops are not re-ingested. A delivered crop is
+  removed from it once its finished copy is written (unless
+  `delete_crops_after_delivery` is off), so it normally holds only what is
+  still waiting to be delivered. A crop whose finished copy could not be
+  completed (for example its EXIF or profile failed to write) is kept, with a
+  warning in the console.
 - Changing the destination mid-run takes effect at the next folder boundary,
   never mid-folder.
 - Writes that fail are put back on the queue rather than dropped, with limits:
@@ -246,7 +267,9 @@ Notes:
 - The colour table for a look is built in about half a second and about 270 MB
   (it used to be several seconds and 1.3 GB), and gives exactly the same
   bytes as before.
-- `python test_grade.py` is a self-test that needs no photos.
+- `python test_grade.py` is a self-test that needs no photos. `python test_tether.py`
+  does the same for Tether Room's metadata, Good-crop and cleanup handling, and the
+  crop settings (no GPU or crop engine needed).
 
 ## Licence
 

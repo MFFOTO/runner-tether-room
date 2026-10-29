@@ -62,6 +62,13 @@ MERGED_CONFIG_EXTRA: Dict[str, Any] = {
         "premium_batch_size": 100,
         "premium_batch_timeout_sec": 120,
         "batch_folder_prefix": "",      # "" -> folders are 1, 2, 3; "RACE" -> RACE1, RACE2
+        # Only Premium crops are delivered. False (default): crops that are not
+        # Premium are never written at all. True: Good crops are also saved, to
+        # B_Good in the work folder, but still not delivered.
+        "keep_good_crops": False,
+        # Once a Premium crop's finished copy is written to the destination, remove
+        # the native-size crop from the work folder. Crops that failed to deliver stay.
+        "delete_crops_after_delivery": True,
         "note_dir": "",                 # where delivery.txt goes; "" -> with the photos
         "stop_when_idle_sec": 0,        # >0: exit after this long with nothing new (for tests)
     },
@@ -148,6 +155,17 @@ class MergedSuite(HighResRunnerSuite):
     # the run is shutting down instead of holding the grader thread forever.
     stop_event: Optional[threading.Event] = None
 
+    def _should_save_class(self, quality_class: str, score: float) -> bool:
+        """Premium always; Good only if the operator asked to keep it. Anything
+        else is dropped before it is resized, sharpened, encoded or written, so
+        leaving Good crops out also saves that work."""
+        if quality_class == "premium":
+            return True
+        keep_good = bool(self.cfg["merged"].get("keep_good_crops", False))
+        if quality_class == "good":
+            return keep_good
+        return keep_good and super()._should_save_class(quality_class, score)
+
     # The engine calls this after every JPEG it writes: stage-1 crops (src is the
     # original photo), stage-2 deliveries (src is the stage-1 crop) and enhanced
     # copies. Overriding it is what makes the two promises below hold for all of
@@ -158,7 +176,8 @@ class MergedSuite(HighResRunnerSuite):
     #     the pixel dimensions are corrected. If a maker note is too big to fit,
     #     only that is dropped. The base version swallowed every error silently.
     #   * the file is tagged sRGB IEC61966-2.1.
-    def _copy_exif_without_orientation(self, src: Path, dst: Path) -> None:
+    def _copy_exif_without_orientation(self, src: Path, dst: Path) -> bool:
+        """True if the EXIF (when wanted) and the profile are in the file."""
         try:
             src_data = Path(src).read_bytes()
             segs: List[bytes] = []
@@ -179,8 +198,10 @@ class MergedSuite(HighResRunnerSuite):
             tmp = Path(dst).with_name(Path(dst).name + ".part")
             tmp.write_bytes(out)
             os.replace(tmp, dst)
+            return True
         except Exception as exc:
             print(f"\n[WARN] {Path(dst).name}: EXIF / colour profile not written ({exc})")
+            return False
 
     def _warn_once(self, key: str, msg: str) -> None:
         seen = self.__dict__.setdefault("_warned", set())
@@ -409,7 +430,15 @@ class MergedSuite(HighResRunnerSuite):
         if not cv2.imwrite(str(dst), img, [cv2.IMWRITE_JPEG_QUALITY, quality]):
             self._faults[src] = "write"
             return False
-        self._copy_exif_without_orientation(src, dst)
+        complete = self._copy_exif_without_orientation(src, dst)
+        # The finished copy is in place, so the native-size crop is no longer
+        # needed. If its metadata could not be written it stays, next to the
+        # warning, rather than being the only good copy that gets thrown away.
+        if complete and bool(self.cfg["merged"].get("delete_crops_after_delivery", True)):
+            try:
+                src.unlink()
+            except OSError:
+                pass
         return True
 
     def deliver_batch(self, crops: List[Path], batch_no: int, out_root: Path) -> Tuple[int, int]:

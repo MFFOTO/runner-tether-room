@@ -141,6 +141,8 @@
     "file_stability_checks": 2,
     "premium_batch_size": 100,
     "premium_batch_timeout_sec": 120,
+    "keep_good_crops": false,
+    "delete_crops_after_delivery": true,
     "batch_folder_name_pattern": "{}",
     "stop_when_idle_sec": 0,
     "note_dir": "D:/ProLoad Bulk Loader/Release"
