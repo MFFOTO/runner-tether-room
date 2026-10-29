@@ -280,7 +280,10 @@ class App:
                 queued = len(p.pending)
                 cropped = p.crops_done
             s.update({
-                "cropped": cropped, "queued": queued,
+                # "cropped" is progress through the folder, including photos an
+                # earlier run already did; "cropped_run" is this run's own work,
+                # which is what rates are measured on.
+                "cropped": cropped + p.skipped_known, "cropped_run": cropped, "queued": queued,
                 "delivered": p.delivered, "batches": p.batches_done,
                 "failed": len(p.quarantined),
                 "seen": len(p.seen),
@@ -296,7 +299,7 @@ class App:
                 "known_skipped": p.skipped_known,
             })
         else:
-            s.update({"cropped": 0, "queued": 0, "delivered": 0, "batches": 0,
+            s.update({"cropped": 0, "cropped_run": 0, "queued": 0, "delivered": 0, "batches": 0,
                       "seen": 0, "elapsed": 0, "grading": False, "log": [],
                       "grading_on": True, "want_workers": 0})
         # Crops cut in THIS run only. The work folder outlives a run, so its
@@ -1223,8 +1226,8 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
   $('t-watch').textContent=s.watch||'—'; $('t-out').textContent=s.out||'—';
   const el=s.elapsed||0;
   $('r-el').textContent=el?Math.floor(el/60)+'m '+String(Math.floor(el%60)).padStart(2,'0')+'s':'—';
-  $('r-cr').textContent=el&&s.cropped?(s.cropped/el*60).toFixed(0)+' photos/min':'—';
-  $('r-y').textContent=s.cropped?((s.delivered+s.queued)/s.cropped).toFixed(2):'—';
+  $('r-cr').textContent=el&&s.cropped_run?(s.cropped_run/el*60).toFixed(0)+' photos/min':'—';
+  $('r-y').textContent=s.cropped_run?((s.delivered+s.queued)/s.cropped_run).toFixed(2):'—';
   $('r-dr').textContent=s.queued>s.batch_size*2?'falling behind':'keeping up';
   const mf=$('r-mf');
   if(mf) mf.textContent = s.manifest

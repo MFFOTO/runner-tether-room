@@ -24,6 +24,7 @@ encoded exactly once.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -607,6 +608,12 @@ class Pipeline:
         self._ledger_lock = threading.Lock()
         self._cropped_before: Set[str] = set()
         self.skipped_known = 0                   # photos skipped because an earlier run did them
+        # The engine only writes its per-photo report at the end of its own batch
+        # mode, which this pipeline does not use, so it is written here instead:
+        # one file per run in the work folder, refreshed while running.
+        self._report_path: Optional[Path] = None
+        self._report_written = 0.0
+        self._report_warned = False
         if recrop:
             self._reset_ledger()
         else:
@@ -728,6 +735,45 @@ class Pipeline:
         except OSError:
             pass
         return fresh
+
+    REPORT_EVERY_SEC = 120.0
+
+    def write_crop_report(self) -> Optional[Path]:
+        """Save what the engine decided for every photo this run (accepted or
+        rejected, and why) as runner_crop_report_<date>_<time>.csv in the work
+        folder. A new file per run, so a restart never overwrites an earlier one."""
+        if not bool(self.s.cfg.get("debug", {}).get("write_csv", True)):
+            return None
+        report_lock = getattr(self.s, "report_lock", None)
+        with (report_lock or threading.Lock()):
+            rows = list(getattr(self.s, "report_rows", []))
+        self._report_written = time.time()
+        if not rows:
+            return None
+        if self._report_path is None:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            path, n = self.work / f"runner_crop_report_{stamp}.csv", 2
+            while path.exists():
+                path = self.work / f"runner_crop_report_{stamp}_{n}.csv"; n += 1
+            self._report_path = path
+        fields: List[str] = []
+        for row in rows:
+            for key in row:
+                if key not in fields:
+                    fields.append(key)
+        tmp = self._report_path.with_name(self._report_path.name + ".part")
+        try:
+            with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(rows)
+            os.replace(tmp, self._report_path)
+        except OSError as exc:                  # e.g. the file is open in Excel
+            if not self._report_warned:
+                self._report_warned = True
+                print(f"[WARN] could not save {self._report_path.name} ({exc}); will try again")
+            return None
+        return self._report_path
 
     def _on_premium(self, path: Path) -> None:
         """Called by the suite from whichever worker wrote the crop."""
@@ -1116,6 +1162,8 @@ class Pipeline:
                 if not self.cropping_on.is_set():
                     time.sleep(0.3)              # paused: pick up nothing new until resumed
                     continue
+                if time.time() - self._report_written >= self.REPORT_EVERY_SEC:
+                    self.write_crop_report()
                 fresh = self._scan()
                 if fresh:
                     self.last_arrival = time.time()
@@ -1137,6 +1185,7 @@ class Pipeline:
             pool.shutdown(wait=True)
             self.stop.set()
             grader.join(timeout=1800)
+            report = self.write_crop_report()
             self.finished.set()
             secs = time.time() - t0
             print("\n" + "=" * 72)
@@ -1149,6 +1198,8 @@ class Pipeline:
             print(f"wall             : {secs:.1f}s "
                   f"({secs / max(1, self.crops_done):.3f}s per photo)")
             print(f"retouched folder : {self.out}")
+            if report:
+                print(f"crop report      : {report}")
             print("=" * 72)
 
 

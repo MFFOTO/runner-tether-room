@@ -130,6 +130,19 @@ Fields: `spot name`, `order number`, `number of images`, `description`.
 The first row is a fixed header. The spot name carries the folder number, so a
 row and its folder are the same string.
 
+## Where things are saved
+
+| what | where |
+|---|---|
+| finished photos | `<output folder>\<spot>1`, `<spot>2` ... |
+| delivery note | `delivery.txt` in the note folder (`merged.note_dir`, default `D:/ProLoad Bulk Loader/Release`) |
+| crop report, one file per run | `<watched folder>_crops\runner_crop_report_<date>_<time>.csv`: every photo the engine looked at, accepted or rejected, and why (box size, sharpness, score, class, reason). Refreshed every two minutes and when the run ends |
+| photos already cropped | `<watched folder>_crops\_cropped.log` |
+| native-size crops waiting for delivery | `<watched folder>_crops\A_Premium` (plus `B_Good` if Good crops are kept) |
+| crops given up on | `<watched folder>_crops\_failed` |
+
+Grade Room writes `_grade_report.csv` into its output folder.
+
 ## Configuration
 
 `setup.bat` copies `settings_merged.example.json` to `settings_merged.json`,

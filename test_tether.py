@@ -262,7 +262,16 @@ def fake_run(tag, nphotos=0, per_photo=0.05, recrop=False, root_=None, workers=8
               "performance": {"workers": workers}}
     su.output_folder = work; su.ui_mode = True; su._lut_asked = False; su._lut_name = None
     su.cropped_names = []
-    su.process_image = lambda pth: (time.sleep(per_photo), su.cropped_names.append(pth.name))
+    su.report_rows = []; su.report_lock = threading.Lock(); su.cfg["debug"] = {"write_csv": True}
+
+    def crop(pth):
+        time.sleep(per_photo); su.cropped_names.append(pth.name)
+        n = len(su.cropped_names)           # alternate between the two row shapes the engine produces
+        row = ({"image": str(pth), "decision": "accept", "reason": "ok", "output_path": "x.jpg"} if n % 2
+               else {"image": str(pth), "decision": "reject", "reason": "too_small", "box_height": 99})
+        with su.report_lock:
+            su.report_rows.append(row)
+    su.process_image = crop
     return su, ms.Pipeline(su, watch, None, work, recrop=recrop), watch, work
 
 
@@ -293,11 +302,23 @@ chk("Stop: only part of the folder was cropped", 20 <= len(first_run) < 120, len
 chk("the ledger has exactly the photos that were cropped",
     len((work / "_cropped.log").read_text().splitlines()) == len(first_run) == pipe.crops_done)
 
+import csv as _csv                                               # noqa: E402
+reports1 = sorted(work.glob("runner_crop_report_*.csv"))
+chk("a crop report was saved for the run, in the work folder", len(reports1) == 1, [r.name for r in reports1])
+rows1 = list(_csv.DictReader(open(reports1[0], encoding="utf-8-sig"))) if reports1 else []
+chk("...with one row per cropped photo", len(rows1) == len(first_run), (len(rows1), len(first_run)))
+chk("...and the columns of both row types (accepted and rejected) in the header",
+    reports1 and {"output_path", "reason", "box_height", "decision"} <= set(rows1[0].keys()))
+chk("...and no half-written .part file is left behind", not list(work.glob("*.part")))
 su2, pipe2, _, _ = fake_run("resume", per_photo=0.01, root_=root / "resume")
 t = run_in_thread(pipe2)
 wait_for(lambda: pipe2.crops_done + len(first_run) >= 120)
 time.sleep(0.5); pipe2.request_stop(); t.join(timeout=20)
 second_run = set(su2.cropped_names)
+reports2 = sorted(work.glob("runner_crop_report_*.csv"))
+chk("a restart writes its own report and leaves the first one alone",
+    len(reports2) == 2 and reports1[0] in reports2 and len(list(_csv.DictReader(open(reports1[0], encoding="utf-8-sig")))) == len(first_run),
+    [r.name for r in reports2])
 chk("restart: nothing cropped twice", not (first_run & second_run), sorted(first_run & second_run)[:3])
 chk("restart: together the two runs cropped every photo exactly once", first_run | second_run == {f"IMG_{i:04d}.jpg" for i in range(120)})
 chk("restart: reports how many it skipped", pipe2.skipped_known == len(first_run))
@@ -369,7 +390,7 @@ def make_app(tag):
         f = watch / f"IMG_{i:04d}.jpg"; f.write_bytes(b"x" * (50 + i)); os.utime(f, (1_700_000_000 + i,) * 2)
     su = ms.MergedSuite.__new__(ms.MergedSuite)
     su.cfg = {"merged": dict(ms.MERGED_CONFIG_EXTRA["merged"], poll_interval_sec=0.1, file_stability_checks=1),
-              "performance": {"workers": 4}, "lut": {"lut_folder": str(base)}, "paths": {}, "debug": {}}
+              "performance": {"workers": 4}, "lut": {"lut_folder": str(base)}, "paths": {}, "debug": {}, "selection_filters": {"premium_min_sharpness": 180, "min_height_ratio": 0.15, "min_box_height_px": 220}}
     su._lut_asked = False; su._lut_name = None; su.ui_mode = True
     su.look_event = threading.Event(); su.cropped_names = []
     su.process_image = lambda pth: (time.sleep(0.02), su.cropped_names.append(pth.name))
@@ -405,6 +426,11 @@ chk("Resume: destination, look and job details are put back without asking again
     r["restored"] and a.pipe.out == out and su._lut_name == "grade.cube"
     and a.job == {"spot": "finish", "order": "8765", "desc": "10k men"} and su.cfg["merged"]["batch_folder_prefix"] == "finish")
 wait_for(lambda: len(set(su.cropped_names)) >= 30)
+st = a.state()
+chk("after a restart, Cropped counts the photos done earlier too (progress through the folder), so it matches Arrived",
+    st["cropped"] == 30 == st["seen"], (st["cropped"], st["seen"]))
+chk("...while the run's own count, used for rates, is only what it cropped itself",
+    st["cropped_run"] == 30 - first, (st["cropped_run"], first))
 a.stop(); a.thread.join(timeout=15)
 chk("Resume: carries on where it stopped, every photo cropped exactly once",
     len(su.cropped_names) == len(set(su.cropped_names)) == 30, (len(su.cropped_names), len(set(su.cropped_names))))
