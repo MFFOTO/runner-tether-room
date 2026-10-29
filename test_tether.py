@@ -323,6 +323,11 @@ chk("restart: nothing cropped twice", not (first_run & second_run), sorted(first
 chk("restart: together the two runs cropped every photo exactly once", first_run | second_run == {f"IMG_{i:04d}.jpg" for i in range(120)})
 chk("restart: reports how many it skipped", pipe2.skipped_known == len(first_run))
 
+# 1b. timing and the early-skip counter that the page shows
+chk("worker time per photo is measured (a 0.2 s fake photo reads as roughly 200 ms)", 120 <= pipe.avg_photo_ms <= 900, pipe.avg_photo_ms)
+su.stats = {"skipped_fence_soft": 3, "skipped_early_partial": 2, "skipped_fence_score": 1, "processed_crops": 40}
+chk("skipped-early counts only the fast path's own counters", pipe.skipped_early == 6, pipe.skipped_early)
+
 # 2. a replaced file (same name, new content) and the re-crop option
 f0 = watch / "IMG_0000.jpg"; f0.write_bytes(b"new picture, same name"); os.utime(f0, (1_800_000_000, 1_800_000_000))
 su3, pipe3, _, _ = fake_run("resume", per_photo=0.0, root_=root / "resume")
@@ -427,6 +432,8 @@ chk("Resume: destination, look and job details are put back without asking again
     and a.job == {"spot": "finish", "order": "8765", "desc": "10k men"} and su.cfg["merged"]["batch_folder_prefix"] == "finish")
 wait_for(lambda: len(set(su.cropped_names)) >= 30)
 st = a.state()
+chk("the page state carries the timing and skip figures", isinstance(st["avg_photo_ms"], int) and st["skipped_early"] == 0
+    and st["avg_photo_ms"] >= 0, (st["avg_photo_ms"], st["skipped_early"]))
 chk("after a restart, Cropped counts the photos done earlier too (progress through the folder), so it matches Arrived",
     st["cropped"] == 30 == st["seen"], (st["cropped"], st["seen"]))
 chk("...while the run's own count, used for rates, is only what it cropped itself",
@@ -478,6 +485,29 @@ for tname, T in (("light", L), ("dark", D)):
                                 ("warning text on panel", "--warn", "--panel", 4.5), ("status dot on panel", "--live", "--panel", 3.0)]:
         c = contrast(T[fg], T[bg])
         chk(f"contrast, {tname}: {label} is at least {need}:1", c >= need, f"{c:.2f}")
+
+# ---------------------------------------------------------------- compare_reports.py
+import compare_reports as cr                                      # noqa: E402
+
+def _write_report(path, rows):
+    cols = sorted({k for r in rows for k in r})
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = _csv.DictWriter(f, fieldnames=cols); w.writeheader(); w.writerows(rows)
+A = [{"image": "D:\\t\\IMG_1.JPG", "candidate_idx": 0, "decision": "accept", "quality_class": "premium", "reason": "ok"},
+     {"image": "D:\\t\\IMG_2.JPG", "candidate_idx": 0, "decision": "accept", "quality_class": "premium", "reason": "ok"},
+     {"image": "D:\\t\\IMG_3.JPG", "candidate_idx": 1, "decision": "reject", "reason": "too_small"}]
+B_same = [dict(A[0], quality_score=81), dict(A[1], quality_score=79), A[2]]       # scores differ, crops do not
+B_diff = [A[0], A[2], {"image": "D:\\other\\img_9.jpg", "candidate_idx": 0, "decision": "accept", "quality_class": "premium", "reason": "ok"}]
+ra, rb, rc = root / "a.csv", root / "b.csv", root / "c.csv"
+_write_report(ra, A); _write_report(rb, B_same); _write_report(rc, B_diff)
+import contextlib as _ctx                                          # noqa: E402
+with _ctx.redirect_stdout(io.StringIO()) as out_same:
+    code_same = cr.main(["x", str(ra), str(rb)])
+with _ctx.redirect_stdout(io.StringIO()) as out_diff:
+    code_diff = cr.main(["x", str(ra), str(rc)])
+chk("compare_reports: the same Premium crops read as IDENTICAL even if scores differ", code_same == 0 and "IDENTICAL" in out_same.getvalue(), out_same.getvalue())
+chk("compare_reports: a lost and a gained crop are both listed, and the exit code says different",
+    code_diff == 1 and "img_2.jpg" in out_diff.getvalue() and "img_9.jpg" in out_diff.getvalue() and "DIFFERENT" in out_diff.getvalue(), out_diff.getvalue())
 
 print("\nFAILED:" if fails else "\nALL PASS", fails or "")
 _td.cleanup()

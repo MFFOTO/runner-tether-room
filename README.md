@@ -137,6 +137,55 @@ Fields: `spot name`, `order number`, `number of images`, `description`.
 The first row is a fixed header. The spot name carries the folder number, so a
 row and its folder are the same string.
 
+## Speed
+
+Cropping a photo means decoding it (a 25 MP JPEG), finding the runners (YOLO), and
+then judging each runner it found: crop, measure sharpness, fence check, score. Most
+runners found are dropped, so most of the judging is wasted. **Fast path**
+(`merged.fast_path`, on by default) skips judging work whose result could not change
+what is saved:
+
+| skipped | when | why it cannot change the result |
+|---|---|---|
+| everything after the keypoint check | the runner is cut off by the frame or missing body parts | the completeness guard demotes it and it is dropped anyway |
+| the fence check (the costliest step) | its sharpness is below *Premium needs sharpness of at least* and Good crops are off | it cannot be Premium, so nothing the fence check says matters |
+| the fence check | the best score it could get, assuming no fence, is still below the Premium line | a fence can only lower the score |
+| the whole-box sharpness figure | the sharpness metric is `subject` (the default) | it was only written to the report; `sharp_box` is blank there in fast mode |
+
+`test_fast_path.py` runs the engine's real per-photo loop on hundreds of random photos
+and settings with the fast path off and on, and requires the same crops to come out.
+
+Measured through that loop on a 25 MP test photo (one test machine, synthetic
+photos; the ratios matter, not the milliseconds):
+
+| photo | engine alone | fast path |
+|---|---|---|
+| soft runner (below the Premium sharpness line) | 69 ms | 2 ms |
+| partly visible runner | 57 ms | 0 ms |
+| marginal runner (score ceiling below the line) | 18 ms | 1 ms |
+| crowd: 1 Premium crop + 3 partly visible runners | 247 ms | 98 ms |
+| a runner that is kept | 113 ms | 96 ms |
+
+What it cannot skip: decoding the photo and the YOLO pass, because every photo has to
+be searched for Premium runners. A photo-wide blur test in front of YOLO is not safe
+either, because the sharpness that matters is the runner's, and a panned shot has a
+sharp runner on a blurred background. Not writing Good crops saves only their encode and
+write (about 50 ms each), because stage 1 does no resizing or sharpening.
+
+**See what it does on your PC.** The Throughput card shows *worker time / photo* and
+*skipped early*, and the run's report keeps one row per candidate. To check any speed
+experiment on your own photos, run the same folder twice with *Crop photos again* ticked
+(for example fast path off, then on, or a different `detector.imgsz`) and compare:
+
+```
+python compare_reports.py runner_crop_report_A.csv runner_crop_report_B.csv
+```
+
+It lists Premium crops that appear in only one run. For the fast path the answer should
+be *IDENTICAL*. Settings that trade quality for speed (a smaller `detector.imgsz`, a
+stricter `pre_check`) can lose crops; this is how to see whether they do before you rely
+on them.
+
 ## Where things are saved
 
 | what | where |
@@ -159,6 +208,7 @@ which is git-ignored so each machine keeps its own paths. Worth knowing:
 |---|---|
 | `merged.premium_batch_size` | crops per folder (100) |
 | `merged.keep_good_crops` | `false` (default): only Premium crops are written. `true`: Good crops are also kept in `B_Good` in the work folder, undelivered |
+| `merged.fast_path` | `true` (default): skip work that cannot change what is saved (see *Speed*). `false` runs the engine exactly as it is |
 | `merged.delete_crops_after_delivery` | `true` (default): the native-size crop is removed from the work folder once its finished copy is delivered |
 | `selection_filters.premium_min_sharpness` | a crop softer than this cannot be Premium (180; 0 = off) |
 | `completeness_guard.edge_truncation_guard` | `true` (default): a runner cut by the photo's left/right edge cannot be Premium, and a close-up touching the left, right or top edge no longer bypasses the completeness check |
@@ -322,7 +372,8 @@ Notes:
 - `python test_grade.py` is a self-test that needs no photos. `python test_tether.py`
   does the same for Tether Room's metadata, Good-crop and cleanup handling, and the
   crop settings (no GPU or crop engine needed). `python test_edge_guard.py` runs the
-  edge guard against the real, fetched crop engine (no model or GPU needed).
+  edge guard against the real, fetched crop engine (no model or GPU needed), and
+  `python test_fast_path.py` checks that the fast path saves exactly the same crops.
 
 ## Licence
 

@@ -70,6 +70,12 @@ MERGED_CONFIG_EXTRA: Dict[str, Any] = {
         # Once a Premium crop's finished copy is written to the destination, remove
         # the native-size crop from the work folder. Crops that failed to deliver stay.
         "delete_crops_after_delivery": True,
+        # Skip work that cannot change what is saved: the fence check and scoring
+        # for a candidate that cannot reach the lowest class still being kept, and
+        # the whole-box sharpness figure that is only reported. Saves about 120 ms
+        # per candidate that would have been dropped anyway. Switch off to run the
+        # engine exactly as it is.
+        "fast_path": True,
         "note_dir": "",                 # where delivery.txt goes; "" -> with the photos
         "stop_when_idle_sec": 0,        # >0: exit after this long with nothing new (for tests)
     },
@@ -179,9 +185,9 @@ class MergedSuite(HighResRunnerSuite):
     def _is_full_frame_runner(self, box: Any, img_shape: Any) -> bool:
         # The close-up path bypasses the safe zone, the keypoint minimum and the
         # completeness guard. A close-up cut off by the frame must not use it.
-        if self._cut_by_frame(box, img_shape, top=True):
-            return False
-        return super()._is_full_frame_runner(box, img_shape)
+        full = False if self._cut_by_frame(box, img_shape, top=True) else super()._is_full_frame_runner(box, img_shape)
+        self._begin_candidate(box, full)           # first hook the engine calls for each candidate
+        return full
 
     def _assess_completeness(self, kp: Any, person_box: Any, img_shape: Any) -> Dict[str, Any]:
         comp = super()._assess_completeness(kp, person_box, img_shape)
@@ -191,6 +197,147 @@ class MergedSuite(HighResRunnerSuite):
                 comp["ok_for_premium"] = False
                 comp["reason"] = "truncated_side"
         return comp
+
+    # ------------------------------------------------------------------
+    # skip work that cannot change what is saved (merged.fast_path)
+    # ------------------------------------------------------------------
+    # The engine measures, fence-checks and scores every candidate before it
+    # decides whether the crop is worth keeping. Most candidates are dropped, so
+    # most of that work is wasted. Every rule below skips only work whose result
+    # could not change the outcome, and the tests run the engine's real loop both
+    # ways and require the same crops to come out. The hooks pass notes about the
+    # candidate being judged to each other through a per-thread scratch area.
+    _tl = threading.local()
+    _NEUTRAL_FENCE = {"fence_detected": False, "fence_score": 0.0, "vertical_line_count": 0,
+                      "person_occlusion_coverage": 0.0, "central_occlusion_score": 0.0,
+                      "vertical_line_coverage": 0.0}
+
+    def _fast_enabled(self) -> bool:
+        return bool(self.cfg["merged"].get("fast_path", True))
+
+    def _saveable_floor(self) -> Optional[float]:
+        """The lowest quality score at which a candidate could still be saved, or
+        None when pruning by score would not be exact (Good and Review crops are
+        both kept, so almost anything could be)."""
+        qs, keep_good = self.cfg["quality_scoring"], bool(self.cfg["merged"].get("keep_good_crops", False))
+        if keep_good and bool(qs.get("save_review", False)):
+            return None
+        classes = qs.get("classes", {})
+        return float(classes.get("good", 60) if keep_good else classes.get("premium", 73))
+
+    def _begin_candidate(self, box: Any, full: bool) -> None:
+        tl = self._tl
+        tl.cand, tl.full = box, full
+        tl.idx = getattr(tl, "n", 0); tl.n = tl.idx + 1
+        tl.kp = tl.sharp_subject = tl.sharp_box = tl.skip = tl.skip_reason = None
+        tl.box_skipped = False
+
+    def _process_detection_results(self, img: Any, img_path: Path, results: Any) -> None:
+        tl = self._tl
+        tl.img, tl.boxes, tl.confs, tl.cand, tl.n = img, None, None, None, 0
+        try:
+            r = results[0]
+            if r.boxes is not None and len(r.boxes):
+                tl.boxes = [tuple(map(float, row[:4])) for row in r.boxes.xyxy.cpu().numpy()]
+                tl.confs = r.boxes.conf.cpu().numpy() if r.boxes.conf is not None else None
+        except Exception:
+            tl.boxes = None                       # no notes: every rule then declines to skip
+        try:
+            return super()._process_detection_results(img, img_path, results)
+        finally:
+            tl.img = tl.boxes = tl.confs = tl.cand = None
+
+    def _try_whole_image_fallback(self, img: Any, img_path: Path, reason: str) -> None:
+        self._tl.cand = None                      # the fallback has no candidate: never skip inside it
+        return super()._try_whole_image_fallback(img, img_path, reason)
+
+    def get_smart_crop(self, img: Any, kp: Any, person_box: Any) -> Any:
+        # An incomplete runner is demoted by the completeness guard and then
+        # dropped, so measuring, fence-checking and scoring it is wasted effort.
+        tl = self._tl
+        if (self._fast_enabled() and tl.cand is person_box and self._saveable_floor() is not None
+                and bool(self.cfg.get("completeness_guard", {}).get("enabled", True))):
+            comp = self._assess_completeness(kp, person_box, img.shape[:2])
+            if not comp["ok_for_premium"]:
+                tl.skip_reason = "skipped_" + str(comp["reason"] or "partial_body")
+                self._inc("skipped_early_partial")
+                return None
+        return super().get_smart_crop(img, kp, person_box)
+
+    def get_sharpness_score(self, image: Any) -> float:
+        tl = self._tl
+        subject = str(self.cfg["selection_filters"].get("sharpness_metric", "subject")).lower() == "subject"
+        if self._fast_enabled() and subject and getattr(tl, "cand", None) is not None:
+            tl.box_skipped = True                 # only reported in this mode, never used to decide
+            return 0.0
+        v = super().get_sharpness_score(image)
+        if getattr(tl, "cand", None) is not None:
+            tl.sharp_box = v
+        return v
+
+    def get_subject_sharpness(self, img: Any, kp: Any, person_box: Any) -> float:
+        v = super().get_subject_sharpness(img, kp, person_box)
+        tl = self._tl
+        if getattr(tl, "cand", None) is person_box:
+            tl.kp, tl.sharp_subject = kp, v
+        return v
+
+    def _cannot_be_saved(self, crop_box: Any, person_box: Any) -> Optional[str]:
+        """Why this candidate cannot be saved whatever the fence check finds, or None."""
+        tl, sf = self._tl, self.cfg["selection_filters"]
+        subject = str(sf.get("sharpness_metric", "subject")).lower() == "subject"
+        sharp = tl.sharp_subject if subject else tl.sharp_box
+        if sharp is None:
+            return None
+        keep_good = bool(self.cfg["merged"].get("keep_good_crops", False))
+        premium_min = float(sf.get("premium_min_sharpness", 0))
+        if not keep_good and premium_min > 0 and sharp < premium_min:
+            return "soft"                         # cannot be Premium; Good crops are not kept
+        floor = self._saveable_floor()
+        if floor is None or tl.boxes is None or tl.idx >= len(tl.boxes):
+            return None
+        conf = float(tl.confs[tl.idx]) if tl.confs is not None and tl.idx < len(tl.confs) else 1.0
+        # A fence can only lower the score, so scoring as if there were none gives a
+        # ceiling. If even that is below the line, the fence check cannot rescue it.
+        ceiling = super().calculate_quality_score(
+            img=tl.img, crop_box=crop_box, person_box=person_box, kp=tl.kp, boxes=tl.boxes,
+            current_idx=tl.idx, sharpness=sharp, conf=conf, fence_info=self._NEUTRAL_FENCE,
+            is_full_frame=bool(tl.full))[0]
+        return "score" if ceiling < floor else None
+
+    def detect_fence(self, crop: Any, crop_box: Any, person_box: Any) -> Dict[str, Any]:
+        tl = self._tl
+        if self._fast_enabled() and getattr(tl, "cand", None) is person_box:
+            why = self._cannot_be_saved(crop_box, person_box)
+            if why:
+                tl.skip = why
+                self._inc("skipped_fence_" + why)
+                return dict(self._NEUTRAL_FENCE)
+        return super().detect_fence(crop, crop_box, person_box)
+
+    def calculate_quality_score(self, img: Any, crop_box: Any, person_box: Any, kp: Any, boxes: Any,
+                                current_idx: int, sharpness: float, conf: float,
+                                fence_info: Dict[str, Any], is_full_frame: bool) -> Any:
+        score, cls, details = super().calculate_quality_score(
+            img, crop_box, person_box, kp, boxes, current_idx, sharpness, conf, fence_info, is_full_frame)
+        tl = self._tl
+        if getattr(tl, "skip", None) and getattr(tl, "cand", None) is person_box:
+            # The fence check was skipped, so this score is a ceiling, not a verdict.
+            # It is below the line (or the crop is too soft), so the crop is dropped.
+            details["quality_class"] = "reject"
+            details["skipped_early"] = tl.skip
+            return score, "reject", details
+        return score, cls, details
+
+    def _report(self, row: Dict[str, Any]) -> None:
+        tl = self._tl
+        if getattr(tl, "skip_reason", None) and row.get("reason") == "crop_failed":
+            row["reason"] = tl.skip_reason         # say why, not "crop failed"
+            tl.skip_reason = None
+            self._inc("crop_failed", -1)
+        if getattr(tl, "box_skipped", False) and "sharp_box" in row:
+            row["sharp_box"] = ""                  # not measured in fast mode
+        super()._report(row)
 
     def _should_save_class(self, quality_class: str, score: float) -> bool:
         """Premium always; Good only if the operator asked to keep it. Anything
@@ -602,6 +749,8 @@ class Pipeline:
         self.abandon = threading.Event()
         self.finished = threading.Event()        # run() has fully wound down
         self._in_flight = 0                      # photos being cropped right now
+        self._photo_secs = 0.0                   # worker time spent inside process_image this run
+        self._photos_timed = 0
         # Which photos were already cropped, kept on disk so a stopped or
         # crashed run carries on where it left off instead of starting over.
         self._ledger_path = work / self._CROP_LEDGER
@@ -797,14 +946,18 @@ class Pipeline:
             return
         with self.lock:
             self._in_flight += 1
+        t0 = time.perf_counter()
         try:
             self.s.process_image(p)
         except Exception as exc:
             print(f"[ERROR] crop failed for {p.name}: {exc}")
             return
         finally:
+            dt = time.perf_counter() - t0
             with self.lock:
                 self._in_flight -= 1
+                self._photo_secs += dt
+                self._photos_timed += 1
         self._record_cropped(p)
         with self.lock:
             self.crops_done += 1
@@ -1103,6 +1256,18 @@ class Pipeline:
             return self._in_flight
 
     @property
+    def avg_photo_ms(self) -> float:
+        """Average worker time per photo in this run (decode, detect, judge, write)."""
+        with self.lock:
+            return self._photo_secs / self._photos_timed * 1000.0 if self._photos_timed else 0.0
+
+    @property
+    def skipped_early(self) -> int:
+        """Candidates the fast path dropped without the fence check or scoring."""
+        stats = getattr(self.s, "stats", {}) or {}
+        return int(sum(v for k, v in list(stats.items()) if k.startswith("skipped_")))
+
+    @property
     def stopping(self) -> bool:
         return self.stop_requested.is_set() and not self.finished.is_set()
 
@@ -1197,6 +1362,9 @@ class Pipeline:
             print(f"look             : {self.s._lut_name or 'ungraded'}")
             print(f"wall             : {secs:.1f}s "
                   f"({secs / max(1, self.crops_done):.3f}s per photo)")
+            if self._photos_timed:
+                print(f"worker time/photo: {self.avg_photo_ms:.0f} ms, "
+                      f"{self.skipped_early} candidate(s) skipped early by the fast path")
             print(f"retouched folder : {self.out}")
             if report:
                 print(f"crop report      : {report}")

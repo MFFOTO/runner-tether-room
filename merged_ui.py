@@ -274,6 +274,7 @@ class App:
             "batch_size": int(self.suite.cfg["merged"]["premium_batch_size"]) if self.suite else 100,
             "workers": int(self.suite.cfg["performance"].get("workers", 0)) if self.suite else 0,
             "stopping": False, "cropping_on": True, "in_flight": 0, "known_skipped": 0,
+            "avg_photo_ms": 0, "skipped_early": 0,
         }
         p = self.pipe
         if p:
@@ -298,6 +299,8 @@ class App:
                 "cropping_on": bool(p.cropping_on.is_set()),
                 "in_flight": p.in_flight,
                 "known_skipped": p.skipped_known,
+                "avg_photo_ms": round(p.avg_photo_ms),
+                "skipped_early": p.skipped_early,
             })
         else:
             s.update({"cropped": 0, "cropped_run": 0, "queued": 0, "delivered": 0, "batches": 0,
@@ -962,6 +965,8 @@ body[data-s=paused] .dot,body[data-s=stopping] .dot,body[data-s=switching] .dot{
       <div class="rate"><span>premium/photo</span><b id="r-y">—</b></div>
       <div class="rate"><span>queue</span><b id="r-dr">—</b></div>
       <div class="rate" id="r-skrow" hidden><span>already cropped</span><b id="r-sk">0</b></div>
+      <div class="rate"><span>worker time / photo</span><b id="r-tp">—</b></div>
+      <div class="rate" id="r-sxrow" hidden><span>skipped early</span><b id="r-sx" title="candidates dropped without the fence check or scoring, because they could not have been saved">0</b></div>
       <div class="rate"><span>delivery note</span><b id="r-mf">not set</b></div>
     </div></div>
  </aside>
@@ -1291,6 +1296,8 @@ function tick(){ j('/api/state').then(s=>{ ST=Object.assign({},s,{watch:ST.watch
   cb.style.borderColor = CROPPING ? '' : 'var(--accent)';
   cb.style.color = CROPPING ? '' : 'var(--accent)';
   $('r-skrow').hidden=!(s.known_skipped>0); $('r-sk').textContent=fmt(s.known_skipped||0);
+  $('r-tp').textContent = s.avg_photo_ms ? (s.avg_photo_ms>=1000 ? (s.avg_photo_ms/1000).toFixed(2)+' s' : s.avg_photo_ms+' ms') : '—';
+  $('r-sxrow').hidden=!(s.skipped_early>0); $('r-sx').textContent=fmt(s.skipped_early||0);
   const pb=$('pausebtn'); pb.hidden=!running||!!s.stopping;
   pb.textContent = GRADING ? 'Pause grading' : 'Resume grading';
   pb.style.borderColor = GRADING ? '' : 'var(--accent)';
