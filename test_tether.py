@@ -106,6 +106,16 @@ icc = gs.extract_icc(crop.read_bytes())
 chk("stage 1: tagged sRGB IEC61966-2.1", icc == srgb.srgb_icc() and gs.icc_name(icc) == "sRGB IEC61966-2.1")
 chk("stage 1: still decodes", cv2.imread(str(crop)) is not None)
 
+# newer engines pass the written size as a third argument; both call styles must work
+three = (tmp := (root / 'meta') / "three.jpg"); cv2.imwrite(str(three), arr[50:250, 50:250])
+chk("the metadata step accepts the engine's third argument (the written size) and uses it",
+    ms_._copy_exif_without_orientation(orig, three, (200, 200)) is True
+    and piexif.load(str(three))["Exif"][piexif.ExifIFD.PixelXDimension] == 200
+    and gs.extract_icc(three.read_bytes()) == srgb.srgb_icc())
+size_x = (root / 'meta') / "four.jpg"; cv2.imwrite(str(size_x), arr[50:250, 50:250])
+ms_._copy_exif_without_orientation(orig, size_x, (1234, 567))
+chk("an explicit size wins over the file's header", piexif.load(str(size_x))["Exif"][piexif.ExifIFD.PixelXDimension] == 1234)
+
 # stage 2: finished image written by cv2, hook called with the crop
 fin = (root / 'meta') / "fin.jpg"; cv2.imwrite(str(fin), cv2.resize(arr, (800, 600)))
 ms_._copy_exif_without_orientation(crop, fin)

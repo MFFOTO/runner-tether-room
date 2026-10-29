@@ -360,17 +360,18 @@ class MergedSuite(HighResRunnerSuite):
     #     the pixel dimensions are corrected. If a maker note is too big to fit,
     #     only that is dropped. The base version swallowed every error silently.
     #   * the file is tagged sRGB IEC61966-2.1.
-    def _copy_exif_without_orientation(self, src: Path, dst: Path) -> bool:
-        """True if the EXIF (when wanted) and the profile are in the file."""
+    def _copy_exif_without_orientation(self, src: Path, dst: Path, size: Optional[Tuple[int, int]] = None) -> bool:
+        """True if the EXIF (when wanted) and the profile are in the file. `size` is the
+        written image's (width, height) when the caller knows it; newer engines pass it."""
         try:
             src_data = Path(src).read_bytes()
             segs: List[bytes] = []
             exif_dict = gs._load_exif(src_data)
             if gs.piexif is not None and bool(self.cfg["image_quality"].get("preserve_exif", True)):
-                size = gs.jpeg_size(dst)
-                if size is None:
+                wh = size or gs.jpeg_size(dst)
+                if wh is None:
                     raise ValueError("cannot read the size of the written JPEG")
-                exif = gs.build_exif(exif_dict, None, size)
+                exif = gs.build_exif(exif_dict, None, wh)
                 if exif:
                     segs.append(gs.exif_segment(exif))
                     if not gs.has_capture_date(exif):
