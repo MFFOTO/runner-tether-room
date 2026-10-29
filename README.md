@@ -4,7 +4,7 @@ Crop and colour-grade race photos as they arrive from a tethered camera.
 
 Point it at the folder your tethering software writes into. Every photo is
 cropped to its runners as it lands; once 100 Premium crops have accumulated
-they are finished, graded with a LUT of your choosing and written to a numbered
+they are finished, retouched with a LUT of your choosing and written to a numbered
 folder, together with a tab-separated delivery note for the uploader.
 
 Two stages run independently, which is the point: **choosing or changing the
@@ -110,9 +110,9 @@ Finished photos land in numbered folders named after the spot:
 
 ```
 D:\wherever\
-    finish1\      100 graded crops
-    finish2\      100 graded crops
-    finish3\       47 graded crops
+    finish1\      100 retouched crops
+    finish2\      100 retouched crops
+    finish3\       47 retouched crops
 ```
 
 The delivery note is one tab-separated line per **closed** folder, written once
@@ -241,12 +241,12 @@ Start it with `run_grade.bat` (opens http://127.0.0.1:8771/). The first run
 creates `settings_grade.json` from `settings_grade.example.json`; it is
 git-ignored like the Tether Room settings.
 
-1. **Folders.** Choose *Photos to grade* and *Save graded copies to*. The
+1. **Folders.** Choose *Photos to grade* and *Save retouched copies to*. The
    output mirrors the input: same subfolders, same file names. The output may
    not be inside the input (or the reverse), and originals are never touched.
 2. **Look.** Pick a `.cube` from the strip. Every tile is one of your own
    photos with that look applied. The strength slider blends the look with the
-   original, and holding a sample shows the ungraded photo. Double-click a
+   original, and holding a sample shows the original photo. Double-click a
    sample, or press *Enlarge*, to see it at the size of your window: it appears
    at once and sharpens when the large version arrives. Hold the picture to
    compare with the original, use the arrow keys (or the side buttons) to step
@@ -260,7 +260,7 @@ git-ignored like the Tether Room settings.
    Room's stage 2. Also here: JPEG quality, parallel workers (automatic by default), *Keep watching
    for new photos after this batch* (files still being written are left until
    their size stops changing), *Overwrite files that already exist in the
-   output*, and *Grade files that Grade Room has already graded*.
+   output*, and *Retouch files that Grade Room has already retouched*.
 4. **Start grading.** Progress is live; Stop ends the run cleanly and keeps what is already written.
    While it runs, the *Parallel workers* box under the progress numbers changes
    the worker count on the spot (1–64) — press Apply and watch the rate and
@@ -272,7 +272,7 @@ Notes:
   written under a temporary name and renamed, so a killed run never leaves a
   half-written JPEG.
 - Every output carries `GradeRoom: <look> strength=… ` in its EXIF Software
-  tag. A file already stamped is skipped rather than graded twice, unless
+  tag. A file already stamped is skipped rather than retouched twice, unless
   the regrade option is on.
 - **Small photos.** Photos whose longer side is under 4000 px are flagged, never
   skipped. After you choose the input folder the page reads every JPEG header

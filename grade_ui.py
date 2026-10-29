@@ -2,7 +2,7 @@
 """
 Grade Room UI -- a local page for applying LUTs to folders of JPEGs.
 
-Pick the input folder, pick where the graded copies go, pick a look (previewed
+Pick the input folder, pick where the retouched copies go, pick a look (previewed
 on your own photos, with a strength slider), press Start. Nothing is cropped and
 nothing is uploaded; it works with no internet.
 
@@ -523,7 +523,8 @@ td{padding:8px 10px 8px 0;border-bottom:1px solid var(--line)}td.mono{font-famil
 body[data-s=running] .pill,body[data-s=watching] .pill,body[data-s=building] .pill,body[data-s=starting] .pill{background:var(--live-soft);border-color:var(--live-line);color:var(--accent)}
 body[data-s=error] .pill{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
 .pill .state{color:inherit;letter-spacing:.06em;font-weight:500;white-space:nowrap}
-.val.empty{padding:8px 10px}  /* the generic .empty rule's 30px padding was stretching these boxes */
+.val.empty{padding:8px 10px}
+main>*,.card{min-width:0}   /* a long unbreakable line must not widen the page past the window */  /* the generic .empty rule's 30px padding was stretching these boxes */
 .warn{background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--ink)}
 /*@THEME_POLISH@*/
 </style></head><body>
@@ -541,7 +542,7 @@ body[data-s=error] .pill{background:var(--bad-soft);border-color:var(--bad-line)
     <p class="kicker">1 · Folders</p><h3>What to grade, and where the copies go</h3>
     <div class="row"><label class="k">Photos to grade</label><span class="val empty" id="inval">no folder chosen</span>
       <button id="pickin">Browse&hellip;</button></div>
-    <div class="row"><label class="k">Save graded copies to</label><span class="val empty" id="outval">no folder chosen</span>
+    <div class="row"><label class="k">Save retouched copies to</label><span class="val empty" id="outval">no folder chosen</span>
       <button id="pickout">Browse&hellip;</button></div>
     <p class="hint">Sub-folders and file names are kept exactly as they are. The originals are never changed.</p>
     <p class="hint" id="pfinfo" style="display:none"></p>
@@ -574,14 +575,14 @@ body[data-s=error] .pill{background:var(--bad-soft);border-color:var(--bad-line)
         <small id="wauto">automatic: one per CPU thread, fewer if the photos are so large that memory would run short</small></div>
       <div class="opt"><label for="warnbelow">Warn about photos smaller than</label>
         <input type="number" id="warnbelow" min="0" max="20000" step="100"> <span>px on the long side</span>
-        <small>0 = no warning; the photos are graded either way</small></div>
+        <small>0 = no warning; the photos are retouched either way</small></div>
       <div class="opt"><input type="checkbox" id="watch"><label for="watch">Keep watching for new photos after this batch</label></div>
       <div class="opt"><input type="checkbox" id="overwrite"><label for="overwrite">Overwrite files that already exist in the output</label>
         <small>off = they are skipped, so a restart carries on where it stopped</small></div>
-      <div class="opt"><input type="checkbox" id="regrade"><label for="regrade">Grade files that Grade Room has already graded</label>
+      <div class="opt"><input type="checkbox" id="regrade"><label for="regrade">Retouch files that Grade Room has already retouched</label>
         <small>off = skipped, to avoid grading twice</small></div>
     </div>
-    <div class="warn" id="noexif" style="display:none">piexif is not installed, so camera EXIF data will not be copied to the graded files and they cannot be recognised as already graded.</div>
+    <div class="warn" id="noexif" style="display:none">piexif is not installed, so camera EXIF data will not be copied to the retouched files and they cannot be recognised as already retouched.</div>
   </div>
   <div class="go"><button class="primary" id="startbtn" disabled>Start grading</button><span class="sum" id="sum"></span></div>
  </section>
@@ -590,7 +591,7 @@ body[data-s=error] .pill{background:var(--bad-soft);border-color:var(--bad-line)
   <div class="card">
     <p class="kicker" id="lk">Progress</p><div class="big" id="head">&mdash;</div>
     <div class="nums">
-      <div class="num"><div class="big" id="n-done">0</div><div class="l">graded</div></div>
+      <div class="num"><div class="big" id="n-done">0</div><div class="l">retouched</div></div>
       <div class="num"><div class="big" id="n-skip">0</div><div class="l">skipped</div></div>
       <div class="num"><div class="big" id="n-fail">0</div><div class="l">failed</div></div>
       <div class="num"><div class="big" id="n-found">0</div><div class="l">found</div></div>
@@ -648,7 +649,7 @@ const lastName=n=>n.replace(/\.cube$/i,'');
 
 /* ---- folder browser ---- */
 function openBrowse(which){target=which;
-  $('btitle').textContent = which==='in' ? 'Folder of photos to grade' : 'Where should the graded copies go?';
+  $('btitle').textContent = which==='in' ? 'Folder of photos to grade' : 'Where should the retouched copies go?';
   $('browse').classList.add('on'); nav(which==='in' ? IN : (OUT||IN));}
 function nav(p){ j('/api/browse?path='+encodeURIComponent(p)).then(d=>{
   bpath=d.path; $('bpath').textContent=d.path||'This PC';
@@ -668,7 +669,7 @@ $('buse').onclick=()=>{ if(!bpath){toast('Pick a folder first');return;}
   if(target==='in') setInput(bpath); else {OUT=bpath;outTouched=true;paint();}
   $('browse').classList.remove('on');};
 function setInput(p){ IN=p;
-  if(!outTouched){ const sep=(p.indexOf('/')>=0&&p.indexOf('\\')<0)?'/':'\\'; OUT=p.replace(/[\\/]+$/,'')+'_graded'; }
+  if(!outTouched){ const sep=(p.indexOf('/')>=0&&p.indexOf('\\')<0)?'/':'\\'; OUT=p.replace(/[\\/]+$/,'')+'_retouched'; }
   paint();
   j('/api/prepare?input='+encodeURIComponent(p)).then(r=>{
     if(!r.ok){toast(r.error||'could not read that folder');return;}
@@ -804,7 +805,7 @@ function renderPF(pf){
   const unread=pf.unreadable?' '+fmt(pf.unreadable)+' file'+(pf.unreadable===1?' has':'s have')+' no readable size.':'';
   if(pf.small>0){ warn.style.display='block';
     $('pftext').textContent=fmt(pf.small)+' of '+fmt(pf.total)+' photo'+(pf.total===1?' is':'s are')+' smaller than '+fmt(pf.warn_below)
-      +' px on the long side (smallest '+fmt(pf.smallest)+' px).'+unread+' They will still be graded.';
+      +' px on the long side (smallest '+fmt(pf.smallest)+' px).'+unread+' They will still be retouched.';
     fillList($('pflist'),pf.files,pf.small,'the report lists them all after a run'); }
   else if(pf.total>0 && pf.warn_below>0){ info.style.display='block';
     info.textContent='All '+fmt(pf.total)+' photos are '+fmt(pf.warn_below)+' px or larger on the long side.'+unread; }
@@ -814,7 +815,7 @@ function renderSmall(jb){
   w.style.display='block';
   $('smalltext').textContent=fmt(jb.small)+' photo'+(jb.small===1?' is':'s are')+' smaller than '+fmt(jb.warn_below)
     +' px on the long side (smallest '+fmt(jb.small_min)+' px) — '
-    +(jb.finish?'finished to '+fmt(jb.target_height)+' px tall.':'graded at their own size.');
+    +(jb.finish?'finished to '+fmt(jb.target_height)+' px tall.':'retouched at their own size.');
   fillList($('smalllist'),jb.small_files,jb.small,'see the report'); }
 let warnT=0;
 $('warnbelow').addEventListener('input',()=>{ clearTimeout(warnT); warnT=setTimeout(()=>{

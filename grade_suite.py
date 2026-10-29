@@ -10,7 +10,7 @@ Grade Room engine -- applies a .cube LUT to folders of JPEGs. No cropping.
 * Native size by default. "finish" adds Tether Room's stage-2 look: scale to a
   target height (aspect ratio kept -- nothing is trimmed), sharpen, then grade.
 * Every output is stamped in its EXIF Software tag, so a file that has already
-  been graded is recognised and skipped instead of being graded twice.
+  been retouched is recognised and skipped instead of being retouched twice.
 * Every output is tagged sRGB IEC61966-2.1. The .cube files assume sRGB, so a
   source tagged with any other RGB profile is converted to sRGB first (and
   reported); an untagged source is taken to be sRGB already.
@@ -528,7 +528,7 @@ def process_file(src: Path, dst: Path, opts: Options, packed: np.ndarray,
     lap.mark("read")
     exif_dict = _load_exif(data)
     if not opts.regrade and is_stamped(exif_dict):
-        return "graded", "already graded by Grade Room"
+        return "graded", "already retouched by Grade Room"
     lap.mark("exif")
     img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -617,8 +617,8 @@ def check_folders(input_dir: Path, output_dir: Path) -> Optional[str]:
     if not input_dir.is_dir():
         return "the input folder does not exist"
     if _inside(output_dir, input_dir):
-        return ("the output folder is inside the input folder; graded files would be "
-                "picked up and graded again")
+        return ("the output folder is inside the input folder; retouched files would be "
+                "picked up and retouched again")
     if _inside(input_dir, output_dir):
         return "the input folder is inside the output folder"
     return None
@@ -1217,13 +1217,13 @@ def main() -> None:
         while t.is_alive():
             time.sleep(1)
             s = job.snapshot()
-            print(f"\r{s['status']:9s} graded {s['done']}  skipped {s['exists'] + s['graded']}  "
+            print(f"\r{s['status']:9s} retouched {s['done']}  skipped {s['exists'] + s['graded']}  "
                   f"failed {s['failed']}  of {s['found']}", end="", flush=True)
     except KeyboardInterrupt:
         job.stop.set()
         t.join()
     s = job.snapshot()
-    print(f"\n{s['status']}: graded {s['done']}, skipped {s['exists'] + s['graded']}, "
+    print(f"\n{s['status']}: retouched {s['done']}, skipped {s['exists'] + s['graded']}, "
           f"failed {s['failed']} in {s['elapsed']:.0f}s -> {a.output}")
     if s["small"]:
         print(f"WARNING: {s['small']} photo(s) are smaller than {a.warn_below}px on the long side "

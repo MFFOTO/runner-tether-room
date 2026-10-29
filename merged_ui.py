@@ -898,7 +898,7 @@ body[data-s=paused] .dot,body[data-s=stopping] .dot,body[data-s=switching] .dot{
     <ol class="steps">
       <li><b>1</b><div><h4>Pick a folder</h4><p>Photos are cropped the moment they land from the camera.</p></div></li>
       <li><b>2</b><div><h4>Choose a look</h4><p>Previewed on your own crops, applied batch by batch.</p></div></li>
-      <li><b>3</b><div><h4>Finished folders</h4><p>Graded, numbered, 100 to a folder, with a delivery note.</p></div></li>
+      <li><b>3</b><div><h4>Finished folders</h4><p>Retouched, numbered, 100 to a folder, with a delivery note.</p></div></li>
     </ol>
   </section>
 
